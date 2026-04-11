@@ -1,8 +1,32 @@
-streamlit>=1.28.0
-pandas>=2.0.0
-numpy>=1.24.0
-plotly>=5.17.0
-altair>=5.0.0
-Pillow>=10.0.0
+# EA Enterprise Energy Analyzer - Requirements
+# Developed in Python by Master Engineer Erik Armenta
+# City of Juarez, MX
+
+# Core Framework
+streamlit>=1.56.0
+
+# Data Processing (Vectorized Engine)
+pandas>=2.3.0
+numpy>=2.3.0
+
+# Visualizations
+plotly>=6.4.0
+matplotlib>=3.10.0
+
+# UI Components
+streamlit-option-menu>=0.4.0
+streamlit-extras>=1.4.1
+
+# PDF Generation
+fpdf2>=2.8.5
+kaleido==0.1.0.post1
+
+# Cloud (Supabase Integration)
+supabase>=2.27.3
+
+# File Handling
+Pillow>=12.0.0
 openpyxl>=3.1.0
-xlrd>=2.0.0
+
+# Statistical Analysis
+statsmodels>=0.14.0
