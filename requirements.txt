@@ -19,7 +19,7 @@ streamlit-extras>=1.4.1
 
 # PDF Generation
 fpdf2>=2.8.5
-kaleido==0.1.0.post1
+# kaleido removido - se usa Matplotlib para exportar gráficas al PDF (compatible con Linux/Cloud)
 
 # Cloud (Supabase Integration)
 supabase>=2.27.3
