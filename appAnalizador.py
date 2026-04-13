@@ -70,7 +70,7 @@ if PDF_ENABLED:
 def create_pdf_chart_image(df, x_col, y_col, title, chart_type='bar', highlight_peaks=False):
     """Helper para crear gráficas profesionales con etiquetas para el PDF usando Matplotlib"""
     fig, ax = plt.subplots(figsize=(10, 5))
-    
+
     if chart_type == 'bar':
         colors = ['#00B4D8', '#FF6B6B', '#4ECDC4']
         bars = ax.bar(df[x_col].astype(str), df[y_col], color=colors[:len(df)])
@@ -83,19 +83,19 @@ def create_pdf_chart_image(df, x_col, y_col, title, chart_type='bar', highlight_
                         xytext=(0, 3),  # 3 points vertical offset
                         textcoords="offset points",
                         ha='center', va='bottom', fontsize=9, fontweight='bold')
-    
+
     elif chart_type == 'line':
         ax.plot(df[x_col], df[y_col], color='#00B4D8', marker='o', markersize=4, linewidth=2, label='Energy Trend')
         ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
-        
+
         if highlight_peaks:
             # Identificar picos altos (ej: top 10% o por encima de la media)
             threshold = df[y_col].mean() * 1.2
             peaks = df[df[y_col] > threshold]
-            
+
             # Dibujar puntos rojos en los picos
             ax.scatter(peaks[x_col], peaks[y_col], color='red', s=60, edgecolors='white', zorder=5, label='High Peaks')
-            
+
             # Añadir etiquetas solo a los picos
             for _, row in peaks.iterrows():
                 ax.annotate(f'{row[y_col]:.1f}',
@@ -109,12 +109,12 @@ def create_pdf_chart_image(df, x_col, y_col, title, chart_type='bar', highlight_
     ax.set_ylabel('Value (kW)', fontsize=10)
     plt.xticks(rotation=45 if len(df) > 10 else 0)
     ax.grid(True, linestyle='--', alpha=0.6)
-    
+
     # Ajustar estética
     fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
     plt.tight_layout()
-    
+
     tmp_path = tempfile.mktemp(suffix=".png")
     fig.savefig(tmp_path, dpi=150)
     plt.close(fig)
@@ -365,7 +365,7 @@ def render_analisis_turnos(df_filtered, voltage_type):
 @st.fragment
 def render_pdf_exporter(df_filtered, energia_total_kwh, costo_kwh, time_col, report_type='daily'):
     st.markdown(f"<h2 align='center' style='color:#00FFAA;'>📄 {'Daily' if report_type=='daily' else 'Monthly'} Executive PDF Report</h2>", unsafe_allow_html=True)
-    
+
     if st.button(f"Generate {'Daily' if report_type=='daily' else 'Monthly'} Report", use_container_width=True, key=f"pdf_{report_type}"):
         with st.spinner("Compiling structural narrative and rendering visual assets..."):
             try:
@@ -452,8 +452,9 @@ def render_pdf_exporter(df_filtered, energia_total_kwh, costo_kwh, time_col, rep
                 pdf.set_font('Helvetica', '', 11)
                 pdf.set_text_color(40, 40, 40)
 
-                date_start = df_filtered[time_col].min().strftime('%B %d, %Y') if report_type == 'daily' else df_filtered['Dia'].min().strftime('%B %d, %Y')
-                date_end   = df_filtered[time_col].max().strftime('%B %d, %Y') if report_type == 'daily' else df_filtered['Dia'].max().strftime('%B %d, %Y')
+                # Cambiamos df_filtered['Dia'] por df_filtered['Día'] (con acento)
+                date_start = df_filtered[time_col].min().strftime('%B %d, %Y') if report_type == 'daily' else df_filtered['Día'].min().strftime('%B %d, %Y')
+                date_end   = df_filtered[time_col].max().strftime('%B %d, %Y') if report_type == 'daily' else df_filtered['Día'].max().strftime('%B %d, %Y')
 
                 if report_type == 'daily':
                     worst_shift = df_filtered.groupby('Turno')['kW_Instant'].mean().idxmax()
@@ -518,7 +519,7 @@ def render_pdf_exporter(df_filtered, energia_total_kwh, costo_kwh, time_col, rep
                 pdf_bytes = bytes(pdf.output())
                 os.remove(bar_img)
                 os.remove(line_img)
-                
+
                 st.success("Report Compiled Successfully!")
                 st.download_button(label=f"📥 Download {report_type.capitalize()} Report PDF", data=pdf_bytes, file_name=f"Executive_{report_type}_Report.pdf", mime="application/pdf")
 
@@ -529,7 +530,7 @@ def render_pdf_exporter(df_filtered, energia_total_kwh, costo_kwh, time_col, rep
 @st.fragment
 def render_monthly_insights(costo_kwh):
     st.markdown("<h2 align='center' style='color:#7F56D9;'>📅 Monthly Cloud Analysis (Supabase)</h2>", unsafe_allow_html=True)
-    
+
     if not supabase_client:
         st.warning("Cloud Sync is not configured.")
         return
@@ -539,14 +540,14 @@ def render_monthly_insights(costo_kwh):
             # Traer los datos de la tabla sincronizada
             response = supabase_client.table('hobo_monthly_sync').select("*").order("Día", desc=False).execute()
             cloud_raw = response.data
-            
+
             if not cloud_raw:
                 st.info("No historical data found in Supabase. Please synchronize some data first.")
                 return
-            
+
             df_cloud = pd.DataFrame(cloud_raw)
             df_cloud['Día'] = pd.to_datetime(df_cloud['Día'])
-            
+
             # KPIs Mensuales
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -588,7 +589,7 @@ def render_cloud_sync(df_filtered):
     if not supabase_client:
         st.warning("Supabase configuration missing.")
         return
-        
+
     if st.button("🚀 Push to Supabase Cloud", type="primary"):
         with st.spinner("Encrypting and uploading data segments..."):
             try:
@@ -610,7 +611,7 @@ with colA:
         logo = Image.open("EA_2.png")
         st.image(logo, use_container_width=True)
     except: pass
-with colB: 
+with colB:
     st.markdown("<h1 align='center' style='padding-top:20px; font-weight:800;'>Enterprise Energy Analyzer</h1>", unsafe_allow_html=True)
     st.markdown("<div align='center'><span style='color: #00FFAA; letter-spacing: 2px;'>POWERED BY HOBO & VECTOR-CORE ENGINE</span></div>", unsafe_allow_html=True)
 
@@ -621,11 +622,14 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Upload HOBO Report (CSV/XLSX)", type=["csv", "xlsx"])
 
 if not uploaded_file:
-    st.markdown("""<div style="text-align: center; padding: 50px; background-color: #1a1e23; border-radius: 15px; border: 1px solid #333;">
-            <h1 style="color: #4a4e53; font-size: 60px;">🚀</h1><h2 style="color: #e0e6ed;">System Ready & Waiting</h2>
-            <p style="color: #9aa0a6; font-size: 18px; max-width: 600px; margin: 0 auto;">Upload your data file to begin. Vector-Core will process thousands of records instantly.</p><br>
-            <p style="color: #00B4D8; font-weight: bold; font-size: 15px;">🐍 Developed in Python by Master Engineer Erik Armenta</p>
-            <hr style="border-color:#333; margin: 20px auto; width: 50%;"><p style="color: #666; font-size: 14px;">Mastering industrial Amperage into executive insights.</p></div>""", unsafe_allow_html=True)
+    # Usamos un contenedor para evitar que el layout "tiemble" en otras PCs
+    welcome_container = st.container()
+    with welcome_container:
+        st.markdown("""<div style="text-align: center; padding: 50px; background-color: #1a1e23; border-radius: 15px; border: 1px solid #333;">
+                <h1 style="color: #4a4e53; font-size: 60px;">🚀</h1><h2 style="color: #e0e6ed;">System Ready & Waiting</h2>
+                <p style="color: #9aa0a6; font-size: 18px; max-width: 600px; margin: 0 auto;">Upload your data file to begin. Vector-Core will process thousands of records instantly.</p><br>
+                <p style="color: #00B4D8; font-weight: bold; font-size: 15px;">🐍 Developed in Python by Master Engineer Erik Armenta</p>
+                <hr style="border-color:#333; margin: 20px auto; width: 50%;"><p style="color: #666; font-size: 14px;">Mastering industrial Amperage into executive insights.</p></div>""", unsafe_allow_html=True)
     st.stop()
 
 try:
