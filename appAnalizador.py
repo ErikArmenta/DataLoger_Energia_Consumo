@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-⚡ Enterprise Energy Analyzer v5.3 - FULL RESTORATION
-Optimizado para Master Engineer Erik Armenta.
-No se eliminó ninguna funcionalidad: Supabase, PDF, Monthly, Hovers y Estabilidad.
+⚡ Enterprise Energy Analyzer v5.2
+Optimizado con vectorización, st.cache_data, Tabs, fragments, PDF Storyteller, Supabase y Análisis Mensual.
+Developed in Python by Master Engineer Erik Armenta.
 """
 
 import streamlit as st
@@ -20,13 +20,14 @@ import os
 import tempfile
 import matplotlib.pyplot as plt
 
-# --- INTEGRACIONES ---
+# Intentar importar Supabase
 try:
     from supabase import create_client, Client
     SUPABASE_ENABLED = True
 except ImportError:
     SUPABASE_ENABLED = False
 
+# Intentar importar dependencias para PDF
 try:
     from fpdf import FPDF
     PDF_ENABLED = True
@@ -36,14 +37,37 @@ except ImportError:
 # --- CONFIGURACIÓN Y ESTABILIDAD ---
 st.set_page_config(page_title="EA Energy Analyzer", layout="wide", page_icon="⚡")
 
+# Inyección de CSS para eliminar el "temblor" y mejorar estabilidad
 st.markdown("""
     <style>
+    /* Fuerza el scrollbar permanente para evitar saltos de ancho de página */
     html { overflow-y: scroll; }
     .main { overflow-x: hidden; }
-    div.block-container { padding-top: 2rem; padding-bottom: 2rem; }
+    /* Estabiliza el contenedor de bloques */
+    div.block-container { 
+        padding-top: 2rem; 
+        padding-bottom: 2rem;
+        animation: none !important;
+        transition: none !important;
+    }
+    /* Elimina animaciones que causan temblor */
+    .stPlotlyChart {
+        animation: none !important;
+        transition: none !important;
+    }
+    /* Estabiliza los frames de Plotly */
+    .js-plotly-plot {
+        animation: none !important;
+        transition: none !important;
+    }
+    /* Elimina hover transitions que causan reflow */
+    div[data-testid="stVerticalBlock"] {
+        gap: 0rem;
+    }
     </style>
 """, unsafe_allow_html=True)
 
+# Configurar Supabase Client
 @st.cache_resource
 def init_supabase():
     if SUPABASE_ENABLED and "supabase" in st.secrets:
@@ -51,12 +75,13 @@ def init_supabase():
             url = st.secrets["supabase"]["URL"]
             key = st.secrets["supabase"]["KEY"]
             return create_client(url, key)
-        except: return None
+        except Exception as e:
+            return None
     return None
 
 supabase_client = init_supabase()
 
-# --- CLASE PDF Y UTILIDADES ---
+# --- FUNCIONES NÚCLEO PDF (VERSIÓN ESTABLE ANTERIOR) ---
 if PDF_ENABLED:
     class ExecutivePDF(FPDF):
         def header(self):
@@ -65,115 +90,459 @@ if PDF_ENABLED:
             self.cell(0, 15, 'Executive Energy Analysis Report', border=0, align='C', new_x="LMARGIN", new_y="NEXT")
             self.line(10, 25, 200, 25)
             self.ln(5)
+
         def footer(self):
             self.set_y(-15)
             self.set_font('Helvetica', 'I', 8)
             self.set_text_color(128, 128, 128)
-            self.cell(0, 10, f'Page {self.page_no()} - Powered by EA Innovation Vector-Core', 0, 0, 'C')
-
-def sanitize_pdf(text: str) -> str:
-    replacements = {'\u2014': '-', '\u2013': '-', '\u2022': '*', '\u2019': "'", 'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u'}
-    for uni, asc in replacements.items(): text = text.replace(uni, asc)
-    return text.encode('latin-1', errors='replace').decode('latin-1')
+            self.cell(0, 10, f'Page {self.page_no()} - Powered by Vector-Core Engine (Master Engineer Erik Armenta)', 0, 0, 'C')
 
 def create_pdf_chart_image(df, x_col, y_col, title, chart_type='bar', highlight_peaks=False):
     fig, ax = plt.subplots(figsize=(10, 5))
+    
     if chart_type == 'bar':
-        ax.bar(df[x_col].astype(str), df[y_col], color='#00B4D8')
+        colors = ['#00B4D8', '#FF6B6B', '#4ECDC4']
+        bars = ax.bar(df[x_col].astype(str), df[y_col], color=colors[:len(df)])
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
+        ax.set_ylabel('Value (kW)', fontsize=10)
+        for bar in bars:
+            height = bar.get_height()
+            if height > 0:
+                ax.annotate(f'{height:.2f}',
+                            xy=(bar.get_x() + bar.get_width() / 2, height),
+                            xytext=(0, 3), 
+                            textcoords="offset points",
+                            ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
     elif chart_type == 'line':
-        ax.plot(df[x_col], df[y_col], color='#00B4D8', linewidth=2)
-    ax.set_title(title)
+        ax.plot(df[x_col].astype(str), df[y_col], color='#00B4D8', marker='o', markersize=6, linewidth=2, label='Energy Trend')
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
+        ax.set_ylabel('Value (kW)', fontsize=10)
+        if highlight_peaks:
+            threshold = df[y_col].mean() * 1.2
+            peaks = df[df[y_col] > threshold]
+            if not peaks.empty:
+                ax.scatter(peaks[x_col].astype(str), peaks[y_col], color='red', s=80, edgecolors='white', zorder=5, label='High Peaks')
+                for _, row in peaks.iterrows():
+                    ax.annotate(f'{row[y_col]:.1f}',
+                                xy=(row[x_col], row[y_col]),
+                                xytext=(0, 7),
+                                textcoords="offset points",
+                                ha='center', va='bottom', color='red', fontsize=9, fontweight='bold')
+        ax.legend()
+
+    ax.set_xlabel(x_col, fontsize=10)
+    plt.xticks(rotation=45 if len(df) > 10 else 0)
+    ax.grid(True, linestyle='--', alpha=0.6)
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
     plt.tight_layout()
+    
     tmp_path = tempfile.mktemp(suffix=".png")
-    fig.savefig(tmp_path, dpi=120)
+    fig.savefig(tmp_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     return tmp_path
 
-# --- CARGA Y PROCESAMIENTO ---
-@st.cache_data(show_spinner="Analizando HOBO...")
+# --- FUNCIONES DE CARGA Y PROCESAMIENTO ---
+
+@st.cache_data(show_spinner="Analizando archivo HOBO...")
 def load_hobo_data_from_bytes(file_content, extension):
-    if extension == 'csv':
-        content = file_content.decode('utf-8', errors='replace')
-        lines = content.split('\n')
-        data_start = next((i for i, l in enumerate(lines[:30]) if re.search(r'\d+/\d+/\d+', l)), 3)
-        df = pd.read_csv(io.StringIO('\n'.join(lines[data_start:])), sep=None, engine='python').iloc[:, :3]
-        df.columns = ['Index', 'DateTime', 'Amperios']
-        df['DateTime'] = pd.to_datetime(df['DateTime'], errors='coerce')
-        df['Amperios'] = pd.to_numeric(df['Amperios'], errors='coerce')
-        return df.dropna(subset=['DateTime', 'Amperios']).drop(columns=['Index']).reset_index(drop=True), 'DateTime', 'Amperios'
-    else:
-        df = pd.read_excel(io.BytesIO(file_content), skiprows=2).iloc[:, :3]
-        df.columns = ['Index', 'DateTime', 'Amperios']
-        df['DateTime'] = pd.to_datetime(df['DateTime'], errors='coerce')
-        df['Amperios'] = pd.to_numeric(df['Amperios'], errors='coerce')
-        return df.dropna(subset=['DateTime']).reset_index(drop=True), 'DateTime', 'Amperios'
+    try:
+        if extension == 'csv':
+            content = file_content.decode('utf-8', errors='replace')
+            lines = content.split('\n')
+            data_start = 0
+            for i, line in enumerate(lines[:30]):
+                if re.search(r'\d+/\d+/\d+', line) or re.search(r'\d+-\d+-\d+', line):
+                    data_start = i
+                    break
+            if data_start == 0: data_start = 3
+            parsed_data = []
+            for line in lines[data_start:]:
+                if not line.strip(): continue
+                clean_line = line.replace('"', '').strip()
+                parts = clean_line.split('\t')
+                if len(parts) < 2: parts = clean_line.split(',')
+                if len(parts) >= 2: parsed_data.append(parts[:3])
+            if parsed_data:
+                df = pd.DataFrame(parsed_data)
+                df.columns = ['Index', 'DateTime', 'Amperios']
+                df['DateTime'] = pd.to_datetime(df['DateTime'], errors='coerce')
+                df['Amperios'] = pd.to_numeric(df['Amperios'], errors='coerce')
+                df = df.dropna(subset=['DateTime', 'Amperios']).drop(columns=['Index']).reset_index(drop=True)
+                return df, 'DateTime', 'Amperios'
+            return pd.DataFrame(), None, None
+        else:
+            df = pd.read_excel(io.BytesIO(file_content), skiprows=2)
+            df.columns = [str(col).strip() for col in df.columns]
+            time_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+            amp_col = df.columns[2] if len(df.columns) > 2 else df.columns[1]
+            df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
+            df[amp_col] = pd.to_numeric(df[amp_col], errors='coerce')
+            df = df.dropna(subset=[time_col]).reset_index(drop=True)
+            df.rename(columns={time_col: 'DateTime', amp_col: 'Amperios'}, inplace=True)
+            return df, 'DateTime', 'Amperios'
+    except Exception as e:
+        raise RuntimeError(f"Error procesando archivo: {str(e)}")
 
-def preprocess_electric_data(df, t_col, a_col, volt, pf):
+@st.cache_data(show_spinner="Calculando métricas...")
+def preprocess_electric_data(df, time_col, amp_col, voltage_type, pf):
     df = df.copy()
-    df['kW_Instant'] = (volt * df[a_col] * pf * 1.732) / 1000.0
-    h = df[t_col].dt.hour
-    df['Turno'] = np.select([(h >= 6) & (h < 14), (h >= 14) & (h < 22)], [1, 2], default=3)
-    df['Hora'], df['Día'] = h, df[t_col].dt.date
-    return df.sort_values(t_col)
+    df['kW_Instant'] = (voltage_type * df[amp_col] * pf * 1.732) / 1000.0
+    hours = df[time_col].dt.hour
+    conditions = [(hours >= 6) & (hours < 14), (hours >= 14) & (hours < 22)]
+    df['Turno'] = np.select(conditions, [1, 2], default=3)
+    df['Hora'] = hours
+    df['Día'] = df[time_col].dt.date
+    df = df.sort_values(time_col).reset_index(drop=True)
+    return df
 
-# --- FRAGMENTS Y RENDERIZADO ---
-def render_kpi_dashboard(df_filt, t_col, a_col, cost):
-    st.markdown("<h2 align='center' style='color:#00B4D8;'>📊 Dashboard Ejecutivo</h2>", unsafe_allow_html=True)
-    energy = ((df_filt['kW_Instant'] + df_filt['kW_Instant'].shift(1))/2 * (df_filt[t_col].diff().dt.total_seconds()/3600)).sum()
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("⚡ Promedio kW", f"{df_filt['kW_Instant'].mean():.2f}")
-    c2.metric("💡 Energía Total", f"{energy:.2f} kWh")
-    c3.metric("🔴 Pico Máx", f"{df_filt['kW_Instant'].max():.2f} kW")
-    c4.metric("💵 Costo Est.", f"${(energy*cost):,.2f}")
+def calculate_energy_vectorized(df, time_col, power_col):
+    if df.empty or len(df) < 2: return 0.0
+    time_diff_hours = df[time_col].diff().dt.total_seconds() / 3600.0
+    avg_power = (df[power_col] + df[power_col].shift(1)) / 2.0
+    valid_intervals = (time_diff_hours > 0) & (time_diff_hours <= 1.0)
+    energy = (avg_power[valid_intervals] * time_diff_hours[valid_intervals]).sum()
+    return float(energy)
 
-@st.fragment
-def render_tendencias_picos(df_filt, t_col, a_col, sens):
-    st.markdown("<h2 align='center' style='color:#FF6B6B;'>📈 Análisis de Tendencia y Picos</h2>", unsafe_allow_html=True)
-    thresh = df_filt['kW_Instant'].quantile(sens/100)
-    peaks = df_filt[df_filt['kW_Instant'] > thresh]
-    fig = go.Figure()
-    # RESTAURACIÓN DE HOVER PROFESIONAL
-    fig.add_trace(go.Scatter(x=df_filt[t_col], y=df_filt['kW_Instant'], name='Potencia', line=dict(color='#00B4D8', width=1.5),
-                             customdata=df_filt[a_col], text=df_filt['Turno'],
-                             hovertemplate="<b>Tiempo:</b> %{x}<br><b>Potencia:</b> %{y:.2f} kW<br><b>Corriente:</b> %{customdata:.1f} A<br><b>Turno:</b> %{text}<extra></extra>"))
+def detect_peaks_vectorized(df, column, percentile=95):
+    if df.empty: return pd.DataFrame(), 0.0
+    threshold = df[column].quantile(percentile / 100.0)
+    peaks = df[df[column] > threshold].copy()
     if not peaks.empty:
-        fig.add_trace(go.Scatter(x=peaks[t_col], y=peaks['kW_Instant'], mode='markers', name='Pico', marker=dict(color='red', size=8),
-                                 customdata=peaks[a_col], text=peaks['Turno'],
-                                 hovertemplate="<b>⚠️ PICO</b><br><b>Potencia:</b> %{y:.2f} kW<br><b>Corriente:</b> %{customdata:.1f} A<extra></extra>"))
-    fig.update_layout(template="plotly_dark", hovermode="x unified", height=600)
-    st.plotly_chart(fig, use_container_width=True, key="trend_chart_v53") # ESTABILIDAD
+        peaks['peak_magnitude'] = peaks[column] - threshold
+    return peaks, float(threshold)
+
+@st.cache_data(show_spinner=False)
+def get_filter_bounds(df, time_col):
+    return df[time_col].min(), df[time_col].max()
+
+def sanitize_pdf(text: str) -> str:
+    replacements = {
+        '\u2014': ' - ', '\u2013': ' - ', '\u2022': '*', '\u2019': "'",
+        '\u201c': '"', '\u201d': '"', '\u2018': "'", '\u2026': '...',
+        '\u00e9': 'e', '\u00ed': 'i', '\u00f3': 'o', '\u00fa': 'u', '\u00e1': 'a',
+    }
+    for uni, asc in replacements.items():
+        text = text.replace(uni, asc)
+    return text.encode('latin-1', errors='replace').decode('latin-1')
+
+# --- RENDERIZADOS DE SECCIONES ---
+
+def render_kpi_dashboard(df_filtered, time_col, amp_col, energia_total, costo_kwh):
+    st.markdown("<h2 align='center' style='color:#00B4D8;'>📊 Principal Dashboard & KPIs</h2>", unsafe_allow_html=True)
+    st.write("Executive snapshot of the electrical footprint for the selected period.")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1: st.metric("📈 Active Records", f"{len(df_filtered):,}")
+    with col2: st.metric("⚡ Avg Power", f"{df_filtered['kW_Instant'].mean():.2f} kW")
+    with col3: st.metric("💡 Total Energy", f"{energia_total:.2f} kWh", help="Integrated numerically via Trapezoidal Rule")
+    with col4:
+        horas = (df_filtered[time_col].max() - df_filtered[time_col].min()).total_seconds() / 3600
+        st.metric("⏱️ Monitoring Duration", f"{horas:.1f} hrs")
+    with col5: st.metric("🔴 Max Peak", f"{df_filtered['kW_Instant'].max():.2f} kW")
+    st.markdown("---")
+    worst_shift = df_filtered.groupby('Turno')['kW_Instant'].mean().idxmax()
+    best_shift  = df_filtered.groupby('Turno')['kW_Instant'].mean().idxmin()
+    costo_total = energia_total * costo_kwh
+    variability = df_filtered['kW_Instant'].std() / df_filtered['kW_Instant'].mean()
+    peak_hours  = df_filtered.groupby('Hora')['kW_Instant'].max().nlargest(3)
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.info(f"**🎯 Instant Diagnostics**\n- **Most Critical Shift:** Shift {worst_shift}\n- **Most Efficient Shift:** Shift {best_shift}")
+    with col_b:
+        st.metric("📉 Consumption Variability", f"{variability:.2%}")
+        st.metric("💵 Estimated Cost", f"${costo_total:,.2f} MXN")
+    with col_c:
+        peak_list = "\n".join([f"- **{int(hr):02d}:00** → {val:.1f} kW" for hr, val in peak_hours.items()])
+        st.markdown(f"**⏰ Peak Demand Hours:**\n{peak_list}")
 
 @st.fragment
-def render_monthly_insights(cost):
-    st.markdown("<h2 align='center' style='color:#7F56D9;'>📅 Histórico Mensual (Cloud)</h2>", unsafe_allow_html=True)
-    if supabase_client:
-        res = supabase_client.table('hobo_monthly_sync').select("*").execute()
-        if res.data:
-            df_h = pd.DataFrame(res.data)
-            st.plotly_chart(px.bar(df_h, x='Día', y='Potencia_Promedio_kW', template="plotly_dark"), use_container_width=True)
-
-@st.fragment
-def render_pdf_exporter(df_filt, t_col, a_col, cost):
-    st.markdown("<h2 align='center'>📄 Reporte Ejecutivo PDF</h2>", unsafe_allow_html=True)
-    if st.button("Generar PDF", use_container_width=True):
-        pdf = ExecutivePDF()
-        pdf.add_page()
-        pdf.set_font('Helvetica', '', 12)
-        pdf.multi_cell(0, 10, sanitize_pdf(f"Resumen de análisis para el periodo seleccionado. Energía total: {df_filt['kW_Instant'].sum():.2f}"))
-        st.download_button("Descargar", data=bytes(pdf.output()), file_name="Reporte_EA.pdf")
-
-# --- FLUJO ---
-st.title("⚡ Enterprise Energy Analyzer v5.3")
-up = st.sidebar.file_uploader("Cargar HOBO", type=["csv", "xlsx"])
-
-if up:
-    df_r, t_c, a_c = load_hobo_data_from_bytes(up.getvalue(), up.name.split('.')[-1].lower())
-    with st.sidebar:
-        nav = option_menu("Menú", ["Dashboard", "Tendencias", "Mensual", "PDF"], icons=["house", "activity", "calendar", "file-pdf"])
-        v, p, c, s = st.selectbox("Voltaje", [480, 220, 110]), st.number_input("PF", 0.5, 1.0, 0.9), st.number_input("Costo", 0.0, 10.0, 2.85), st.slider("Sensibilidad", 80, 99, 95)
+def render_tendencias_picos(df_filtered, time_col, amp_col, peak_percentile):
+    st.markdown("<h2 align='center' style='color:#FF6B6B;'>📈 Time Trend & Peak Analysis</h2>", unsafe_allow_html=True)
+    peaks, threshold = detect_peaks_vectorized(df_filtered, 'kW_Instant', peak_percentile)
+    if not peaks.empty:
+        st.error(f"⚠️ **DEMAND ALERT**: {len(peaks)} events exceeded threshold ({threshold:.2f} kW).")
     
-    df_f = preprocess_electric_data(df_r, t_c, a_c, v, p)
-    if nav == "Dashboard": render_kpi_dashboard(df_f, t_c, a_c, c)
-    elif nav == "Tendencias": render_tendencias_picos(df_f, t_c, a_c, s)
-    elif nav == "Mensual": render_monthly_insights(c)
-    elif nav == "PDF": render_pdf_exporter(df_f, t_c, a_c, c)
+    # Gráfica con hovers profesionales
+    fig = go.Figure()
+    
+    # Línea principal con hover profesional
+    fig.add_trace(go.Scatter(
+        x=df_filtered[time_col],
+        y=df_filtered['kW_Instant'],
+        name='Power (kW)',
+        line=dict(color='#00B4D8', width=2),
+        hovertemplate='<b>📅 Time</b>: %{x|%Y-%m-%d %H:%M}<br>' +
+                      '<b>⚡ Power</b>: %{y:.2f} kW<br>' +
+                      '<b>🔌 Current</b>: %{customdata:.1f} A<br>' +
+                      '<b>👥 Shift</b>: %{text}<extra></extra>',
+        customdata=df_filtered[amp_col],
+        text=df_filtered['Turno']
+    ))
+    
+    # Línea de umbral
+    fig.add_trace(go.Scatter(
+        x=df_filtered[time_col],
+        y=[threshold] * len(df_filtered),
+        name=f'Threshold ({peak_percentile}%)',
+        line=dict(color='orange', dash='dot', width=2),
+        hovertemplate='<b>⚠️ Threshold</b>: %{y:.2f} kW<extra></extra>'
+    ))
+    
+    # Picos marcados profesionalmente
+    if not peaks.empty:
+        fig.add_trace(go.Scatter(
+            x=peaks[time_col],
+            y=peaks['kW_Instant'],
+            mode='markers',
+            name='⚠️ Peak Event',
+            marker=dict(
+                color='red',
+                size=12,
+                symbol='circle',
+                line=dict(color='white', width=2)
+            ),
+            hovertemplate='<b>🔥 PEAK DETECTED</b><br>' +
+                          '<b>📅 Time</b>: %{x|%Y-%m-%d %H:%M}<br>' +
+                          '<b>⚡ Power</b>: %{y:.2f} kW<br>' +
+                          '<b>🔌 Current</b>: %{customdata:.1f} A<br>' +
+                          '<b>📈 Excess</b>: %{text:.2f} kW above threshold<br>' +
+                          '<b>👥 Shift</b>: %{meta}<extra></extra>',
+            customdata=peaks[amp_col],
+            text=peaks['peak_magnitude'],
+            meta=peaks['Turno']
+        ))
+    
+    fig.update_layout(
+        template="plotly_dark",
+        xaxis_title="Timeline",
+        yaxis_title="Demand Power (kW)",
+        hovermode="x unified",
+        hoverlabel=dict(
+            bgcolor="rgba(0,0,0,0.9)",
+            font_size=13,
+            font_family="Arial Black"
+        ),
+        plot_bgcolor='#1E1E1E',
+        paper_bgcolor='#1E1E1E'
+    )
+    st.plotly_chart(fig, use_container_width=True, config={'staticPlot': False, 'responsive': True})
+
+@st.fragment
+def render_analisis_turnos(df_filtered, voltage_type):
+    st.markdown("<h2 align='center'>👥 Shift Performance Analysis</h2>", unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        turno_means = df_filtered.groupby('Turno')['kW_Instant'].mean().reset_index()
+        turno_means['Turno'] = turno_means['Turno'].astype(str)
+        fig = px.bar(turno_means, x='Turno', y='kW_Instant', color='Turno', title=f"Avg Power per Shift (V={voltage_type}V)")
+        fig.update_layout(template="plotly_dark", hoverlabel=dict(bgcolor="rgba(0,0,0,0.8)", font_size=12))
+        st.plotly_chart(fig, use_container_width=True)
+    with col2:
+        turno_sum = df_filtered.groupby('Turno')['kW_Instant'].sum().reset_index()
+        turno_sum['Turno'] = turno_sum['Turno'].astype(str)
+        fig = px.pie(turno_sum, values='kW_Instant', names='Turno', hole=.5, title="Energy Share (%)")
+        fig.update_layout(template="plotly_dark")
+        fig.update_traces(hovertemplate='<b>Shift %{label}</b><br>Energy: %{value:.2f} kWh<br>Share: %{percent}<extra></extra>')
+        st.plotly_chart(fig, use_container_width=True)
+    
+    st.markdown("### 📈 Hourly Consumption Trend by Shift")
+    df_hourly = df_filtered.groupby(['Hora', 'Turno'])['kW_Instant'].mean().reset_index()
+    df_hourly['Turno'] = df_hourly['Turno'].astype(str)
+    fig_hourly = px.line(df_hourly, x='Hora', y='kW_Instant', color='Turno', markers=True)
+    fig_hourly.update_layout(template="plotly_dark", hovermode="x unified")
+    fig_hourly.update_traces(hovertemplate='<b>Hour: %{x}:00</b><br>Power: %{y:.2f} kW<br>Shift: %{text}<extra></extra>', text=df_hourly['Turno'])
+    st.plotly_chart(fig_hourly, use_container_width=True)
+
+@st.fragment
+def render_pdf_exporter(df_filtered, energia_total_kwh, costo_kwh, time_col, report_type='daily'):
+    st.markdown(f"<h2 align='center' style='color:#00FFAA;'>📄 {'Daily' if report_type=='daily' else 'Monthly'} Executive PDF Report</h2>", unsafe_allow_html=True)
+    if st.button(f"Generate {'Daily' if report_type=='daily' else 'Monthly'} Report", use_container_width=True, key=f"pdf_{report_type}"):
+        with st.spinner("Compiling structural narrative..."):
+            try:
+                if report_type == 'daily':
+                    chart_bar_df = df_filtered.groupby('Turno')['kW_Instant'].mean().reset_index()
+                    chart_bar_df['Label'] = chart_bar_df['Turno'].apply(lambda x: f"Shift {x}")
+                    bar_img = create_pdf_chart_image(chart_bar_df, 'Label', 'kW_Instant', 'Average Power Demand per Shift (kW)')
+                    
+                    # Muestreo para línea
+                    sample_size = min(15, len(df_filtered))
+                    line_df = df_filtered.iloc[::max(1, len(df_filtered)//sample_size)].head(sample_size).copy()
+                    line_df['Time_Str'] = line_df[time_col].dt.strftime('%m/%d %H:%M')
+                    line_img = create_pdf_chart_image(line_df, 'Time_Str', 'kW_Instant', 'Power Evolution (Sample Points)', 'line', highlight_peaks=True)
+                else:
+                    # Para monthly
+                    chart_bar_df = df_filtered.copy()
+                    chart_bar_df['Día_Str'] = chart_bar_df['Día'].astype(str)
+                    bar_img = create_pdf_chart_image(chart_bar_df, 'Día_Str', 'Potencia_Promedio_kW', 'Daily Average Trend (kW)')
+                    line_img = create_pdf_chart_image(df_filtered, 'Día', 'Pico_Maximo_kW', 'Historical Peak Demand Records', 'line', highlight_peaks=True)
+
+                pdf = ExecutivePDF()
+                pdf.add_page()
+                pdf.set_font('Helvetica', 'B', 14)
+                pdf.set_text_color(0, 180, 216)
+                pdf.cell(0, 10, "1. Key Performance Indicators (KPI Summary)", new_x="LMARGIN", new_y="NEXT")
+                
+                # Manejo seguro de fechas
+                try:
+                    if report_type == 'daily':
+                        date_start = df_filtered[time_col].min().strftime('%B %d, %Y')
+                        date_end = df_filtered[time_col].max().strftime('%B %d, %Y')
+                    else:
+                        date_start = df_filtered['Día'].min().strftime('%B %d, %Y')
+                        date_end = df_filtered['Día'].max().strftime('%B %d, %Y')
+                except:
+                    date_start = "Start Date"
+                    date_end = "End Date"
+
+                pdf.set_font('Helvetica', '', 11)
+                pdf.set_text_color(40, 40, 40)
+                narrative = sanitize_pdf(f"Report Period: {date_start} to {date_end}. Total Energy: {energia_total_kwh:,.2f} kWh.")
+                pdf.multi_cell(0, 6, narrative)
+                
+                pdf.image(bar_img, w=180)
+                pdf.add_page()
+                pdf.image(line_img, w=180)
+
+                pdf_bytes = bytes(pdf.output())
+                os.remove(bar_img)
+                os.remove(line_img)
+                st.success("Report Compiled Successfully!")
+                st.download_button(label="📥 Download PDF", data=pdf_bytes, file_name=f"Executive_{report_type}_Report.pdf", mime="application/pdf")
+            except Exception as e:
+                st.error(f"Error compiling PDF: {str(e)}")
+                st.info("PDF generation requires fpdf and matplotlib. Install with: pip install fpdf matplotlib")
+
+@st.fragment
+def render_monthly_insights(costo_kwh):
+    st.markdown("<h2 align='center' style='color:#7F56D9;'>📅 Monthly Cloud Analysis (Supabase)</h2>", unsafe_allow_html=True)
+    if not supabase_client:
+        st.warning("Cloud Sync is not configured. Please add Supabase credentials to secrets.")
+        return
+    with st.spinner("Fetching historical data..."):
+        try:
+            response = supabase_client.table('hobo_monthly_sync').select("*").order("Día", desc=False).execute()
+            cloud_raw = response.data
+            if not cloud_raw:
+                st.info("No historical data found. Use Cloud Sync to upload data first.")
+                return
+            df_cloud = pd.DataFrame(cloud_raw)
+            df_cloud['Día'] = pd.to_datetime(df_cloud['Día'])
+            col1, col2, col3 = st.columns(3)
+            with col1: st.metric("Total Days", len(df_cloud))
+            with col2: st.metric("Monthly Avg Power", f"{df_cloud['Potencia_Promedio_kW'].mean():.2f} kW")
+            with col3: st.metric("Absolute Peak", f"{df_cloud['Pico_Maximo_kW'].max():.2f} kW")
+            
+            fig = px.bar(df_cloud, x='Día', y='Potencia_Promedio_kW', template="plotly_dark", title="Daily Average Power Trend")
+            fig.update_layout(hoverlabel=dict(bgcolor="rgba(0,0,0,0.8)", font_size=12))
+            st.plotly_chart(fig, use_container_width=True)
+            
+            energy_est_mo = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
+            render_pdf_exporter(df_cloud, energy_est_mo, costo_kwh, 'Día', report_type='monthly')
+        except Exception as e:
+            st.error(f"Cloud fetch failed: {str(e)}")
+
+@st.fragment
+def render_cloud_sync(df_filtered):
+    st.markdown("<h2 align='center' style='color:#7F56D9;'>☁️ Cloud Data Synchronization</h2>", unsafe_allow_html=True)
+    if not supabase_client:
+        st.warning("Supabase client not available. Check your configuration.")
+        return
+    
+    if st.button("🚀 Push to Supabase Cloud", type="primary"):
+        with st.spinner("Uploading to cloud..."):
+            try:
+                daily_data = df_filtered.groupby('Día').agg(
+                    Potencia_Promedio_kW=('kW_Instant', 'mean'),
+                    Pico_Maximo_kW=('kW_Instant', 'max')
+                ).reset_index()
+                daily_data['Día'] = daily_data['Día'].astype(str)
+                supabase_client.table('hobo_monthly_sync').insert(daily_data.to_dict(orient='records')).execute()
+                st.success("✅ Successfully synchronized with cloud!")
+                st.balloons()
+            except Exception as ex:
+                st.error(f"Sync failed: {str(ex)}")
+                st.info("Make sure table 'hobo_monthly_sync' exists with columns: Día (text), Potencia_Promedio_kW (float), Pico_Maximo_kW (float)")
+
+# --- MAIN APP FLOW ---
+with st.container():
+    colA, colB = st.columns([1, 8])
+    with colA:
+        try:
+            logo = Image.open("EA_2.png")
+            st.image(logo, use_container_width=True)
+        except: 
+            st.write("⚡")
+    with colB: 
+        st.markdown("<h1 align='center' style='padding-top:20px; font-weight:800;'>Enterprise Energy Analyzer</h1>", unsafe_allow_html=True)
+        st.markdown("<div align='center'><span style='color: #00FFAA; letter-spacing: 2px;'>POWERED BY HOBO & VECTOR-CORE ENGINE</span></div>", unsafe_allow_html=True)
+
+st.markdown("---")
+
+with st.sidebar:
+    st.markdown("### 📡 Data Intake")
+    uploaded_file = st.file_uploader("Upload HOBO Report (CSV/XLSX)", type=["csv", "xlsx"])
+
+# LÓGICA DE CONTROL
+if not uploaded_file:
+    welcome_container = st.container()
+    with welcome_container:
+        st.markdown("""<div style="text-align: center; padding: 50px; background-color: #1a1e23; border-radius: 15px; border: 1px solid #333; min-height: 400px;">
+                <h1 style="color: #4a4e53; font-size: 60px;">🚀</h1><h2 style="color: #e0e6ed;">System Ready & Waiting</h2>
+                <p style="color: #9aa0a6; font-size: 18px; max-width: 600px; margin: 0 auto;">Upload your data file to begin. Vector-Core will process thousands of records instantly.</p><br>
+                <p style="color: #00B4D8; font-weight: bold; font-size: 15px;">🐍 Developed in Python by Master Engineer Erik Armenta</p>
+                <hr style="border-color:#333; margin: 20px auto; width: 50%;"><p style="color: #666; font-size: 14px;">Mastering industrial Amperage into executive insights.</p></div>""", unsafe_allow_html=True)
+else:
+    # Si hay archivo, procesamos normalmente
+    try:
+        file_bytes = uploaded_file.getvalue()
+        ext = uploaded_file.name.split('.')[-1].lower()
+        df_raw, t_col, a_col = load_hobo_data_from_bytes(file_bytes, ext)
+
+        with st.sidebar:
+            st.markdown("---")
+            selected_page = option_menu(
+                menu_title="Navigation",
+                options=["KPI Dashboard", "Behaviors", "Trends & Peaks", "Monthly Insights", "Executive PDF", "Cloud Sync"],
+                icons=["layers", "pie-chart", "activity", "calendar-month", "file-earmark-pdf", "cloud-arrow-up"],
+                default_index=0,
+                styles={"nav-link-selected": {"background-color": "#00B4D8"}}
+            )
+            st.markdown("---")
+            with st.expander("⚙️ Electric Parameters", expanded=True):
+                volt = st.selectbox("Voltage (VL-L):", [480, 220, 110], index=0)
+                pf = st.number_input("Power Factor (PF):", 0.5, 1.0, 0.9, 0.01)
+                costo_kwh = st.number_input("💵 kWh Price (MXN):", 0.0, 10.0, 2.85, 0.05)
+            with st.expander("🎯 Filter Engine", expanded=True):
+                min_d, max_d = get_filter_bounds(df_raw, t_col)
+                range_d = st.date_input("Time Range:", [min_d.date(), max_d.date()])
+                shifts = st.multiselect("Shifts:", [1, 2, 3], default=[1, 2, 3])
+                peak_sens = st.slider("Peak Sensitivity (%):", 80, 99, 95, 95)
+
+        df_proc = preprocess_electric_data(df_raw, t_col, a_col, volt, pf)
+        df_filt = df_proc[df_proc['Turno'].isin(shifts)].copy()
+        if len(range_d) == 2:
+            df_filt = df_filt[(df_filt['Día'] >= range_d[0]) & (df_filt['Día'] <= range_d[1])]
+
+        if df_filt.empty: 
+            st.warning("⚠️ No data found with selected filters. Please adjust your criteria.")
+        else:
+            e_total = calculate_energy_vectorized(df_filt, t_col, 'kW_Instant')
+            if selected_page == "KPI Dashboard": 
+                render_kpi_dashboard(df_filt, t_col, a_col, e_total, costo_kwh)
+            elif selected_page == "Trends & Peaks": 
+                render_tendencias_picos(df_filt, t_col, a_col, peak_sens)
+            elif selected_page == "Behaviors": 
+                render_analisis_turnos(df_filt, volt)
+            elif selected_page == "Monthly Insights": 
+                render_monthly_insights(costo_kwh)
+            elif selected_page == "Executive PDF": 
+                render_pdf_exporter(df_filt, e_total, costo_kwh, t_col, 'daily')
+            elif selected_page == "Cloud Sync": 
+                render_cloud_sync(df_filt)
+            
+    except Exception as e:
+        st.error(f"⚠️ Critical error: {str(e)}")
+        st.info("Please check your file format. Supported: CSV/Excel from HOBO data loggers.")
+
+st.markdown("<p style='text-align: right; color:#555; font-size:12px;'>Vector-Core Engine v5.2 | Supabase Cloud Edition | Stabilized Graphics</p>", unsafe_allow_html=True)
