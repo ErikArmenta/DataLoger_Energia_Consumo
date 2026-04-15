@@ -637,4 +637,115 @@ def render_monthly_insights(costo_kwh):
                 
             col1, col2, col3 = st.columns(3)
             with col1: st.metric("Total Days", len(df_cloud))
-            with col2: st.metric("Monthly Avg Power", f"{df_cloud['Pot
+            with col2: st.metric("Monthly Avg Power", f"{df_cloud['Potencia_Promedio_kW'].mean():.2f} kW")
+            with col3: st.metric("Absolute Peak", f"{df_cloud['Pico_Maximo_kW'].max():.2f} kW")
+            
+            fig = px.bar(df_cloud, x='Día', y='Potencia_Promedio_kW', template="plotly_dark", title="Daily Average Power Trend")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Crear DataFrame para el PDF mensual
+            df_cloud['Día'] = pd.to_datetime(df_cloud['Día'])
+            df_cloud['kW_Instant'] = df_cloud['Potencia_Promedio_kW']  # Para compatibilidad
+            
+            energy_est_mo = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
+            render_pdf_exporter(df_cloud, energy_est_mo, costo_kwh, 'Día', report_type='monthly')
+        except Exception as e:
+            st.error(f"Cloud fetch failed: {str(e)}")
+
+@st.fragment
+def render_cloud_sync(df_filtered):
+    st.markdown("<h2 align='center' style='color:#7F56D9;'>☁️ Cloud Data Synchronization</h2>", unsafe_allow_html=True)
+    if not supabase_client:
+        st.warning("Supabase client not available.")
+        return
+    
+    if st.button("🚀 Push to Supabase Cloud", type="primary"):
+        with st.spinner("Uploading..."):
+            try:
+                daily_data = df_filtered.groupby('Día').agg(
+                    Potencia_Promedio_kW=('kW_Instant', 'mean'),
+                    Pico_Maximo_kW=('kW_Instant', 'max')
+                ).reset_index()
+                daily_data['Día'] = daily_data['Día'].astype(str)
+                supabase_client.table('hobo_monthly_sync').insert(daily_data.to_dict(orient='records')).execute()
+                st.success("Successfully synchronized!")
+            except Exception as ex:
+                st.error(f"Sync failed: {str(ex)}")
+
+# --- MAIN APP FLOW ---
+with st.container():
+    colA, colB = st.columns([1, 8])
+    with colA:
+        try:
+            logo = Image.open("EA_2.png")
+            st.image(logo, use_container_width=True)
+        except: 
+            st.write("⚡")
+    with colB: 
+        st.markdown("<h1 align='center' style='padding-top:20px; font-weight:800;'>Enterprise Energy Analyzer</h1>", unsafe_allow_html=True)
+        st.markdown("<div align='center'><span style='color: #00FFAA; letter-spacing: 2px;'>POWERED BY HOBO & VECTOR-CORE ENGINE</span></div>", unsafe_allow_html=True)
+
+st.markdown("---")
+
+with st.sidebar:
+    st.markdown("### 📡 Data Intake")
+    uploaded_file = st.file_uploader("Upload HOBO Report (CSV/XLSX)", type=["csv", "xlsx"])
+
+if not uploaded_file:
+    st.markdown("""<div style="text-align: center; padding: 50px; background-color: #1a1e23; border-radius: 15px;">
+            <h1 style="color: #4a4e53; font-size: 60px;">🚀</h1>
+            <h2 style="color: #e0e6ed;">System Ready & Waiting</h2>
+            <p style="color: #9aa0a6;">Upload your data file to begin analysis.</p>
+            </div>""", unsafe_allow_html=True)
+else:
+    try:
+        file_bytes = uploaded_file.getvalue()
+        ext = uploaded_file.name.split('.')[-1].lower()
+        df_raw, t_col, a_col = load_hobo_data_from_bytes(file_bytes, ext)
+
+        with st.sidebar:
+            st.markdown("---")
+            selected_page = option_menu(
+                menu_title="Navigation",
+                options=["KPI Dashboard", "Behaviors", "Trends & Peaks", "Monthly Insights", "Executive PDF", "Cloud Sync"],
+                icons=["layers", "pie-chart", "activity", "calendar-month", "file-earmark-pdf", "cloud-arrow-up"],
+                default_index=0,
+                styles={"nav-link-selected": {"background-color": "#00B4D8"}}
+            )
+            st.markdown("---")
+            with st.expander("⚙️ Electric Parameters", expanded=True):
+                volt = st.selectbox("Voltage (VL-L):", [480, 220, 110], index=0)
+                pf = st.number_input("Power Factor (PF):", 0.5, 1.0, 0.9, 0.01)
+                costo_kwh = st.number_input("💵 kWh Price (MXN):", 0.0, 10.0, 2.85, 0.05)
+            with st.expander("🎯 Filter Engine", expanded=True):
+                min_d, max_d = get_filter_bounds(df_raw, t_col)
+                range_d = st.date_input("Time Range:", [min_d.date(), max_d.date()])
+                shifts = st.multiselect("Shifts:", [1, 2, 3], default=[1, 2, 3])
+                peak_sens = st.slider("Peak Sensitivity (%):", 80, 99, 95, 95)
+
+        df_proc = preprocess_electric_data(df_raw, t_col, a_col, volt, pf)
+        df_filt = df_proc[df_proc['Turno'].isin(shifts)].copy()
+        if len(range_d) == 2:
+            df_filt = df_filt[(df_filt['Día'] >= range_d[0]) & (df_filt['Día'] <= range_d[1])]
+
+        if df_filt.empty: 
+            st.warning("⚠️ No data found with selected filters.")
+        else:
+            e_total = calculate_energy_vectorized(df_filt, t_col, 'kW_Instant')
+            if selected_page == "KPI Dashboard": 
+                render_kpi_dashboard(df_filt, t_col, a_col, e_total, costo_kwh)
+            elif selected_page == "Trends & Peaks": 
+                render_tendencias_picos(df_filt, t_col, a_col, peak_sens)
+            elif selected_page == "Behaviors": 
+                render_analisis_turnos(df_filt, volt)
+            elif selected_page == "Monthly Insights": 
+                render_monthly_insights(costo_kwh)
+            elif selected_page == "Executive PDF": 
+                render_pdf_exporter(df_filt, e_total, costo_kwh, t_col, 'daily')
+            elif selected_page == "Cloud Sync": 
+                render_cloud_sync(df_filt)
+            
+    except Exception as e:
+        st.error(f"⚠️ Error: {str(e)}")
+
+st.markdown("<p style='text-align: right; color:#555; font-size:12px;'>Vector-Core Engine v5.4 | PDF with AI Narrative | Stable</p>", unsafe_allow_html=True)
