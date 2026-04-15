@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-⚡ Enterprise Energy Analyzer v5.3 - PDF CORREGIDO
-PDFs funcionales con gráficas correctas
+⚡ Enterprise Energy Analyzer v5.4 - PDF CORREGIDO con Narrativa Inteligente
+PDFs funcionales con gráficas correctas y análisis contextual
 """
 
 import streamlit as st
@@ -115,8 +115,8 @@ def create_pdf_chart_image(df, x_col, y_col, title, chart_type='bar'):
             x_vals = range(len(df))
             x_labels = df[x_col].dt.strftime('%m/%d').tolist()
         else:
-            x_vals = df[x_col].astype(str).tolist()
-            x_labels = x_vals
+            x_vals = range(len(df))
+            x_labels = df[x_col].astype(str).tolist()
         
         y_vals = df[y_col].tolist()
         
@@ -181,6 +181,90 @@ def create_pdf_chart_simple(data_dict, title, chart_type='bar'):
     fig.savefig(tmp_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     return tmp_path
+
+def generate_narrative(df, energia_total, costo_kwh, report_type='daily'):
+    """Genera narrativa contextual para el PDF"""
+    narrative = []
+    
+    if report_type == 'daily':
+        # Análisis de consumo
+        avg_power = df['kW_Instant'].mean()
+        max_power = df['kW_Instant'].max()
+        min_power = df['kW_Instant'].min()
+        
+        # Análisis por turno
+        shift_consumption = df.groupby('Turno')['kW_Instant'].mean()
+        worst_shift = shift_consumption.idxmax()
+        best_shift = shift_consumption.idxmin()
+        
+        # Análisis de picos
+        peak_hours = df.groupby('Hora')['kW_Instant'].max().nlargest(3)
+        
+        narrative.append(f"During the analyzed period, the facility consumed {energia_total:,.2f} kWh of electrical energy, ")
+        narrative.append(f"with an estimated cost of ${energia_total * costo_kwh:,.2f} MXN. ")
+        narrative.append(f"The average power demand was {avg_power:.2f} kW, with peaks reaching {max_power:.2f} kW ")
+        narrative.append(f"and minimums of {min_power:.2f} kW.\n\n")
+        
+        narrative.append(f"**Shift Analysis:** Shift {worst_shift} recorded the highest average consumption ")
+        narrative.append(f"({shift_consumption[worst_shift]:.2f} kW), while Shift {best_shift} was the most efficient ")
+        narrative.append(f"({shift_consumption[best_shift]:.2f} kW). ")
+        
+        if worst_shift == 1:
+            narrative.append("The morning shift shows opportunity for load optimization during startup hours. ")
+        elif worst_shift == 2:
+            narrative.append("The evening shift presents the highest demand, possibly due to peak production activities. ")
+        else:
+            narrative.append("The night shift shows elevated consumption, suggesting continuous operations. ")
+        
+        narrative.append(f"\n\n**Peak Demand Analysis:** The highest demand periods occur at ")
+        peak_times = [f"{int(h)}:00 ({p:.1f} kW)" for h, p in peak_hours.items()]
+        narrative.append(", ".join(peak_times))
+        narrative.append(". Consider load shifting or demand response strategies during these hours to reduce costs.\n\n")
+        
+        # Variabilidad
+        variability = df['kW_Instant'].std() / avg_power
+        if variability > 0.3:
+            narrative.append(f"**High Variability Detected:** The consumption shows significant fluctuations ")
+            narrative.append(f"(CV: {variability:.1%}), suggesting intermittent operations or equipment cycling. ")
+            narrative.append("Smoothing production schedules could improve energy efficiency.")
+        else:
+            narrative.append(f"**Stable Consumption Pattern:** The load profile shows consistent behavior ")
+            narrative.append(f"(CV: {variability:.1%}), indicating stable industrial operations.")
+    
+    else:  # monthly
+        if 'Potencia_Promedio_kW' in df.columns:
+            daily_avg = df['Potencia_Promedio_kW'].mean()
+            max_daily = df['Potencia_Promedio_kW'].max()
+            min_daily = df['Potencia_Promedio_kW'].min()
+            
+            # Encontrar mejores y peores días
+            best_day_idx = df['Potencia_Promedio_kW'].idxmin()
+            worst_day_idx = df['Potencia_Promedio_kW'].idxmax()
+            best_day = df.loc[best_day_idx, 'Día'] if 'Día' in df.columns else "a specific day"
+            worst_day = df.loc[worst_day_idx, 'Día'] if 'Día' in df.columns else "a specific day"
+            
+            narrative.append(f"**Monthly Overview:** Over the analyzed month, the average daily consumption ")
+            narrative.append(f"was {daily_avg:.2f} kW, with peaks reaching {max_daily:.2f} kW ")
+            narrative.append(f"and minimums of {min_daily:.2f} kW.\n\n")
+            
+            narrative.append(f"**Performance Highlights:** The most efficient day was {best_day} ")
+            narrative.append(f"with {df.loc[best_day_idx, 'Potencia_Promedio_kW']:.2f} kW average, ")
+            narrative.append(f"while the highest consumption day was {worst_day} ")
+            narrative.append(f"({df.loc[worst_day_idx, 'Potencia_Promedio_kW']:.2f} kW).\n\n")
+            
+            # Tendencia mensual
+            if len(df) > 3:
+                recent_avg = df.tail(7)['Potencia_Promedio_kW'].mean() if len(df) >= 7 else df['Potencia_Promedio_kW'].mean()
+                if recent_avg > daily_avg:
+                    narrative.append(f"**Increasing Trend Alert:** The last week shows higher consumption ")
+                    narrative.append(f"({recent_avg:.2f} kW vs {daily_avg:.2f} kW monthly average). ")
+                    narrative.append("Investigate recent operational changes or equipment additions.")
+                elif recent_avg < daily_avg:
+                    narrative.append(f"**Positive Trend:** Recent days show improved efficiency ")
+                    narrative.append(f"({recent_avg:.2f} kW vs {daily_avg:.2f} kW monthly average). ")
+                    narrative.append("Continue monitoring to sustain these gains.")
+    
+    return "".join(narrative)
 
 # --- FUNCIONES DE CARGA Y PROCESAMIENTO ---
 
@@ -360,10 +444,10 @@ def render_analisis_turnos(df_filtered, voltage_type):
     fig_hourly.update_layout(template="plotly_dark")
     st.plotly_chart(fig_hourly, use_container_width=True)
 
-# --- RENDER PDF CORREGIDO ---
+# --- RENDER PDF CORREGIDO CON NARRATIVA ---
 @st.fragment
 def render_pdf_exporter(df_filtered, energia_total_kwh, costo_kwh, time_col, report_type='daily'):
-    """PDF exporter CORREGIDO - Versión estable"""
+    """PDF exporter CORREGIDO con narrativa contextual"""
     st.markdown(f"<h2 align='center' style='color:#00FFAA;'>📄 {'Daily' if report_type=='daily' else 'Monthly'} Executive PDF Report</h2>", unsafe_allow_html=True)
     
     if not PDF_ENABLED:
@@ -371,24 +455,25 @@ def render_pdf_exporter(df_filtered, energia_total_kwh, costo_kwh, time_col, rep
         return
     
     if st.button(f"📑 Generate {'Daily' if report_type=='daily' else 'Monthly'} Report", use_container_width=True, key=f"pdf_{report_type}"):
-        with st.spinner("Generating executive report..."):
+        with st.spinner("Generating executive report with AI narrative..."):
             try:
                 # Preparar datos según tipo de reporte
                 if report_type == 'daily':
                     # Datos por turno
                     shift_data = df_filtered.groupby('Turno')['kW_Instant'].mean().to_dict()
                     shift_data = {f"Shift {k}": v for k, v in shift_data.items()}
-                    bar_img = create_pdf_chart_simple(shift_data, 'Average Power Demand per Shift (kW)', 'bar')
+                    bar_img = create_pdf_chart_simple(shift_data, 'Figure 1: Average Power Demand per Shift', 'bar')
                     
                     # Datos de muestra para línea
                     sample_df = df_filtered.iloc[::max(1, len(df_filtered)//10)].head(10).copy()
                     sample_df['TimeLabel'] = sample_df[time_col].dt.strftime('%m/%d %H:%M')
-                    line_img = create_pdf_chart_image(sample_df, 'TimeLabel', 'kW_Instant', 'Power Evolution (Sample Period)', 'line')
+                    line_img = create_pdf_chart_image(sample_df, 'TimeLabel', 'kW_Instant', 'Figure 2: Power Evolution (Sample Period)', 'line')
                     
                     date_start = df_filtered[time_col].min().strftime('%B %d, %Y')
                     date_end = df_filtered[time_col].max().strftime('%B %d, %Y')
-                else:
-                    # Para monthly
+                    
+                else:  # monthly
+                    # Verificar columnas disponibles
                     if 'Potencia_Promedio_kW' in df_filtered.columns:
                         daily_avg = df_filtered.set_index('Día')['Potencia_Promedio_kW'].to_dict()
                     else:
@@ -396,7 +481,7 @@ def render_pdf_exporter(df_filtered, energia_total_kwh, costo_kwh, time_col, rep
                     
                     # Tomar últimos 10 días para no saturar
                     daily_items = list(daily_avg.items())[-10:]
-                    bar_img = create_pdf_chart_simple(dict(daily_items), 'Daily Average Power Trend (Last 10 days)', 'bar')
+                    bar_img = create_pdf_chart_simple(dict(daily_items), 'Figure 1: Daily Average Power Trend (Last 10 days)', 'bar')
                     
                     # Datos de picos
                     if 'Pico_Maximo_kW' in df_filtered.columns:
@@ -405,60 +490,106 @@ def render_pdf_exporter(df_filtered, energia_total_kwh, costo_kwh, time_col, rep
                         peak_data = df_filtered.groupby('Día')['kW_Instant'].max().to_dict()
                     
                     peak_items = list(peak_data.items())[-10:]
-                    line_img = create_pdf_chart_simple(dict(peak_items), 'Peak Demand Records (Last 10 days)', 'bar')
+                    line_img = create_pdf_chart_simple(dict(peak_items), 'Figure 2: Peak Demand Records (Last 10 days)', 'bar')
                     
-                    date_start = min(daily_avg.keys()).strftime('%B %d, %Y') if isinstance(min(daily_avg.keys()), pd.Timestamp) else "Start"
-                    date_end = max(daily_avg.keys()).strftime('%B %d, %Y') if isinstance(max(daily_avg.keys()), pd.Timestamp) else "End"
+                    date_start = min(daily_avg.keys()).strftime('%B %d, %Y') if hasattr(min(daily_avg.keys()), 'strftime') else str(min(daily_avg.keys()))
+                    date_end = max(daily_avg.keys()).strftime('%B %d, %Y') if hasattr(max(daily_avg.keys()), 'strftime') else str(max(daily_avg.keys()))
+                
+                # Generar narrativa inteligente
+                narrative = generate_narrative(df_filtered, energia_total_kwh, costo_kwh, report_type)
                 
                 # Crear PDF
                 pdf = ExecutivePDF()
                 pdf.add_page()
                 
-                # Título
+                # Título y encabezado
                 pdf.set_font('Helvetica', 'B', 14)
                 pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 10, "1. Key Performance Indicators (KPI Summary)", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(0, 10, "1. Executive Summary & KPI Analysis", new_x="LMARGIN", new_y="NEXT")
                 
                 # Narrativa
-                pdf.set_font('Helvetica', '', 11)
+                pdf.set_font('Helvetica', '', 10)
                 pdf.set_text_color(40, 40, 40)
-                narrative = sanitize_pdf(f"Report Period: {date_start} to {date_end}. Total Energy: {energia_total_kwh:,.2f} kWh. ")
-                narrative += sanitize_pdf(f"Estimated Cost: ${energia_total_kwh * costo_kwh:,.2f} MXN.")
-                pdf.multi_cell(0, 6, narrative)
+                
+                # Dividir narrativa en párrafos
+                narrative_clean = sanitize_pdf(narrative)
+                paragraphs = narrative_clean.split('\n\n')
+                for para in paragraphs:
+                    if para.strip():
+                        pdf.multi_cell(0, 5, para.strip())
+                        pdf.ln(2)
+                
                 pdf.ln(5)
                 
                 # Gráfica 1
                 pdf.set_font('Helvetica', 'B', 11)
-                pdf.cell(0, 8, "Figure 1: Power Distribution Analysis", new_x="LMARGIN", new_y="NEXT")
+                pdf.set_text_color(0, 180, 216)
+                pdf.cell(0, 8, "Visual Analysis", new_x="LMARGIN", new_y="NEXT")
                 pdf.image(bar_img, w=180)
                 
                 # Nueva página para gráfica 2
                 pdf.add_page()
-                pdf.set_font('Helvetica', 'B', 11)
-                pdf.cell(0, 8, "Figure 2: Time Evolution Analysis", new_x="LMARGIN", new_y="NEXT")
                 pdf.image(line_img, w=180)
+                pdf.ln(5)
                 
-                # Agregar tabla de resumen si es posible
-                pdf.add_page()
+                # Tabla de resumen ejecutivo
                 pdf.set_font('Helvetica', 'B', 11)
-                pdf.cell(0, 8, "Table 1: Executive Summary", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(0, 8, "Executive Data Summary", new_x="LMARGIN", new_y="NEXT")
                 
                 # Datos de resumen
                 pdf.set_font('Helvetica', '', 10)
                 summary_data = [
-                    ["Total Records", f"{len(df_filtered):,}"],
-                    ["Total Energy", f"{energia_total_kwh:,.2f} kWh"],
-                    ["Average Power", f"{df_filtered['kW_Instant'].mean():.2f} kW"],
-                    ["Maximum Peak", f"{df_filtered['kW_Instant'].max():.2f} kW"],
-                    ["Estimated Cost", f"${energia_total_kwh * costo_kwh:,.2f} MXN"],
-                    ["Analysis Date", datetime.now().strftime('%B %d, %Y at %H:%M')]
+                    ["Analysis Period", f"{date_start} to {date_end}"],
+                    ["Total Records Processed", f"{len(df_filtered):,}"],
+                    ["Total Energy Consumed", f"{energia_total_kwh:,.2f} kWh"],
+                    ["Average Power Demand", f"{df_filtered['kW_Instant'].mean():.2f} kW"],
+                    ["Maximum Peak Demand", f"{df_filtered['kW_Instant'].max():.2f} kW"],
+                    ["Minimum Power Demand", f"{df_filtered['kW_Instant'].min():.2f} kW"],
+                    ["Estimated Energy Cost", f"${energia_total_kwh * costo_kwh:,.2f} MXN"],
+                    ["Consumption Variability", f"{(df_filtered['kW_Instant'].std() / df_filtered['kW_Instant'].mean()):.1%}"],
+                    ["Report Generation Date", datetime.now().strftime('%B %d, %Y at %H:%M')]
                 ]
                 
                 for row in summary_data:
-                    pdf.set_font('Helvetica', 'B', 10)
-                    pdf.cell(60, 8, row[0], border=1)
-                    pdf.set_font('Helvetica', '', 10)
-                    pdf.cell(0, 8, row[1], border=1, new_x="LMARGIN", new_y="NEXT")
+                    pdf.set_font('Helvetica', 'B', 9)
+                    pdf.cell(55, 7, row[0], border=1)
+                    pdf.set_font('Helvetica', '', 9)
+                    pdf.cell(0, 7, sanitize_pdf(row[1]), border=1, new_x="LMARGIN", new_y="NEXT")
+                
+                # Recomendaciones
+                pdf.add_page()
+                pdf.set_font('Helvetica', 'B', 11)
+                pdf.set_text_color(0, 180, 216)
+                pdf.cell(0, 8, "Recommendations & Action Items", new_x="LMARGIN", new_y="NEXT")
+                
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                
+                recommendations = []
+                
+                # Generar recomendaciones basadas en datos
+                avg_power = df_filtered['kW_Instant'].mean()
+                max_power = df_filtered['kW_Instant'].max()
+                variability = df_filtered['kW_Instant'].std() / avg_power
+                
+                if max_power > avg_power * 1.5:
+                    recommendations.append("• Implement demand response strategies during peak hours")
+                
+                if variability > 0.3:
+                    recommendations.append("• Investigate intermittent operations causing high load variability")
+                
+                if report_type == 'daily':
+                    shift_means = df_filtered.groupby('Turno')['kW_Instant'].mean()
+                    if shift_means.max() > shift_means.min() * 1.2:
+                        worst_shift = shift_means.idxmax()
+                        recommendations.append(f"• Optimize Shift {worst_shift} operations to reduce energy consumption")
+                
+                recommendations.append("• Schedule regular energy audits to identify efficiency opportunities")
+                recommendations.append("• Consider equipment upgrades for high-consumption periods")
+                
+                for rec in recommendations:
+                    pdf.multi_cell(0, 6, sanitize_pdf(rec))
+                    pdf.ln(2)
                 
                 # Guardar PDF
                 pdf_bytes = bytes(pdf.output())
@@ -470,7 +601,8 @@ def render_pdf_exporter(df_filtered, energia_total_kwh, costo_kwh, time_col, rep
                 except:
                     pass
                 
-                st.success("✅ Executive report generated successfully!")
+                st.success("✅ Executive report generated successfully with AI narrative!")
+                st.balloons()
                 st.download_button(
                     label="📥 Download PDF Report",
                     data=pdf_bytes,
@@ -497,113 +629,12 @@ def render_monthly_insights(costo_kwh):
                 return
             df_cloud = pd.DataFrame(cloud_raw)
             df_cloud['Día'] = pd.to_datetime(df_cloud['Día'])
+            
+            # Asegurar que tenemos las columnas necesarias
+            if 'Potencia_Promedio_kW' not in df_cloud.columns:
+                st.error("Missing required columns in cloud data")
+                return
+                
             col1, col2, col3 = st.columns(3)
             with col1: st.metric("Total Days", len(df_cloud))
-            with col2: st.metric("Monthly Avg Power", f"{df_cloud['Potencia_Promedio_kW'].mean():.2f} kW")
-            with col3: st.metric("Absolute Peak", f"{df_cloud['Pico_Maximo_kW'].max():.2f} kW")
-            
-            fig = px.bar(df_cloud, x='Día', y='Potencia_Promedio_kW', template="plotly_dark", title="Daily Average Power Trend")
-            st.plotly_chart(fig, use_container_width=True)
-            
-            energy_est_mo = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
-            render_pdf_exporter(df_cloud, energy_est_mo, costo_kwh, 'Día', report_type='monthly')
-        except Exception as e:
-            st.error(f"Cloud fetch failed: {str(e)}")
-
-@st.fragment
-def render_cloud_sync(df_filtered):
-    st.markdown("<h2 align='center' style='color:#7F56D9;'>☁️ Cloud Data Synchronization</h2>", unsafe_allow_html=True)
-    if not supabase_client:
-        st.warning("Supabase client not available.")
-        return
-    
-    if st.button("🚀 Push to Supabase Cloud", type="primary"):
-        with st.spinner("Uploading..."):
-            try:
-                daily_data = df_filtered.groupby('Día').agg(
-                    Potencia_Promedio_kW=('kW_Instant', 'mean'),
-                    Pico_Maximo_kW=('kW_Instant', 'max')
-                ).reset_index()
-                daily_data['Día'] = daily_data['Día'].astype(str)
-                supabase_client.table('hobo_monthly_sync').insert(daily_data.to_dict(orient='records')).execute()
-                st.success("Successfully synchronized!")
-            except Exception as ex:
-                st.error(f"Sync failed: {str(ex)}")
-
-# --- MAIN APP FLOW ---
-with st.container():
-    colA, colB = st.columns([1, 8])
-    with colA:
-        try:
-            logo = Image.open("EA_2.png")
-            st.image(logo, use_container_width=True)
-        except: 
-            st.write("⚡")
-    with colB: 
-        st.markdown("<h1 align='center' style='padding-top:20px; font-weight:800;'>Enterprise Energy Analyzer</h1>", unsafe_allow_html=True)
-        st.markdown("<div align='center'><span style='color: #00FFAA; letter-spacing: 2px;'>POWERED BY HOBO & VECTOR-CORE ENGINE</span></div>", unsafe_allow_html=True)
-
-st.markdown("---")
-
-with st.sidebar:
-    st.markdown("### 📡 Data Intake")
-    uploaded_file = st.file_uploader("Upload HOBO Report (CSV/XLSX)", type=["csv", "xlsx"])
-
-if not uploaded_file:
-    st.markdown("""<div style="text-align: center; padding: 50px; background-color: #1a1e23; border-radius: 15px;">
-            <h1 style="color: #4a4e53; font-size: 60px;">🚀</h1>
-            <h2 style="color: #e0e6ed;">System Ready & Waiting</h2>
-            <p style="color: #9aa0a6;">Upload your data file to begin analysis.</p>
-            </div>""", unsafe_allow_html=True)
-else:
-    try:
-        file_bytes = uploaded_file.getvalue()
-        ext = uploaded_file.name.split('.')[-1].lower()
-        df_raw, t_col, a_col = load_hobo_data_from_bytes(file_bytes, ext)
-
-        with st.sidebar:
-            st.markdown("---")
-            selected_page = option_menu(
-                menu_title="Navigation",
-                options=["KPI Dashboard", "Behaviors", "Trends & Peaks", "Monthly Insights", "Executive PDF", "Cloud Sync"],
-                icons=["layers", "pie-chart", "activity", "calendar-month", "file-earmark-pdf", "cloud-arrow-up"],
-                default_index=0,
-                styles={"nav-link-selected": {"background-color": "#00B4D8"}}
-            )
-            st.markdown("---")
-            with st.expander("⚙️ Electric Parameters", expanded=True):
-                volt = st.selectbox("Voltage (VL-L):", [480, 220, 110], index=0)
-                pf = st.number_input("Power Factor (PF):", 0.5, 1.0, 0.9, 0.01)
-                costo_kwh = st.number_input("💵 kWh Price (MXN):", 0.0, 10.0, 2.85, 0.05)
-            with st.expander("🎯 Filter Engine", expanded=True):
-                min_d, max_d = get_filter_bounds(df_raw, t_col)
-                range_d = st.date_input("Time Range:", [min_d.date(), max_d.date()])
-                shifts = st.multiselect("Shifts:", [1, 2, 3], default=[1, 2, 3])
-                peak_sens = st.slider("Peak Sensitivity (%):", 80, 99, 95, 95)
-
-        df_proc = preprocess_electric_data(df_raw, t_col, a_col, volt, pf)
-        df_filt = df_proc[df_proc['Turno'].isin(shifts)].copy()
-        if len(range_d) == 2:
-            df_filt = df_filt[(df_filt['Día'] >= range_d[0]) & (df_filt['Día'] <= range_d[1])]
-
-        if df_filt.empty: 
-            st.warning("⚠️ No data found with selected filters.")
-        else:
-            e_total = calculate_energy_vectorized(df_filt, t_col, 'kW_Instant')
-            if selected_page == "KPI Dashboard": 
-                render_kpi_dashboard(df_filt, t_col, a_col, e_total, costo_kwh)
-            elif selected_page == "Trends & Peaks": 
-                render_tendencias_picos(df_filt, t_col, a_col, peak_sens)
-            elif selected_page == "Behaviors": 
-                render_analisis_turnos(df_filt, volt)
-            elif selected_page == "Monthly Insights": 
-                render_monthly_insights(costo_kwh)
-            elif selected_page == "Executive PDF": 
-                render_pdf_exporter(df_filt, e_total, costo_kwh, t_col, 'daily')
-            elif selected_page == "Cloud Sync": 
-                render_cloud_sync(df_filt)
-            
-    except Exception as e:
-        st.error(f"⚠️ Error: {str(e)}")
-
-st.markdown("<p style='text-align: right; color:#555; font-size:12px;'>Vector-Core Engine v5.3 | PDF Stable</p>", unsafe_allow_html=True)
+            with col2: st.metric("Monthly Avg Power", f"{df_cloud['Pot
