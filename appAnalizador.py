@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-⚡ Enterprise Energy Analyzer v5.5 - PDF Mensual Corregido + Sliders Funcionales
+⚡ Enterprise Energy Analyzer v5.6 - PDF CORREGIDOS y Precio $2.40
 """
 
 import streamlit as st
@@ -17,6 +17,7 @@ import io
 import os
 import tempfile
 import matplotlib.pyplot as plt
+from io import BytesIO
 
 # Intentar importar Supabase
 try:
@@ -35,7 +36,10 @@ except ImportError:
 # --- CONFIGURACIÓN Y ESTABILIDAD ---
 st.set_page_config(page_title="EA Energy Analyzer", layout="wide", page_icon="⚡")
 
-# CSS para eliminar temblor y estabilizar sliders
+# Precio fijo kWh
+COSTO_KWH = 2.40  # Precio en MXN
+
+# CSS para eliminar temblor
 st.markdown("""
     <style>
     html { overflow-y: scroll; }
@@ -49,13 +53,6 @@ st.markdown("""
     .stPlotlyChart {
         animation: none !important;
         transition: none !important;
-    }
-    /* Estabilizar sliders */
-    div[data-testid="stSlider"] {
-        padding: 10px 0;
-    }
-    div[data-testid="stSlider"] > div {
-        pointer-events: auto !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -74,15 +71,16 @@ def init_supabase():
 
 supabase_client = init_supabase()
 
-# --- FUNCIONES NÚCLEO PDF ---
+# --- FUNCIONES NÚCLEO PDF CORREGIDAS ---
 if PDF_ENABLED:
     class ExecutivePDF(FPDF):
         def header(self):
             self.set_font('Helvetica', 'B', 16)
             self.set_text_color(0, 180, 216)
-            self.cell(0, 12, 'Executive Energy Analysis Report', border=0, align='C', new_x="LMARGIN", new_y="NEXT")
-            self.line(10, 20, 200, 20)
+            self.cell(0, 12, 'Executive Energy Analysis Report', border=0, align='C')
             self.ln(8)
+            self.line(10, 25, 200, 25)
+            self.ln(10)
 
         def footer(self):
             self.set_y(-15)
@@ -90,85 +88,80 @@ if PDF_ENABLED:
             self.set_text_color(128, 128, 128)
             self.cell(0, 8, f'Page {self.page_no()} - Powered by Vector-Core Engine', 0, 0, 'C')
 
-def create_pdf_chart_simple(data_dict, title, chart_type='bar'):
-    """Crea gráficas simples para PDF con datos agregados"""
-    fig, ax = plt.subplots(figsize=(10, 5))
+def create_bar_chart_png(data_dict, title, xlabel='Category', ylabel='Power (kW)'):
+    """Crea gráfico de barras y retorna como bytes"""
+    fig, ax = plt.subplots(figsize=(8, 4))
     
-    if chart_type == 'bar':
-        labels = list(data_dict.keys())
-        values = list(data_dict.values())
-        
-        colors = ['#00B4D8', '#FF6B6B', '#4ECDC4', '#FFB347', '#9B59B6']
-        bars = ax.bar(labels, values, color=colors[:len(labels)])
-        ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
-        ax.set_ylabel('Power (kW)', fontsize=11)
-        
-        for bar, val in zip(bars, values):
-            if val > 0:
-                ax.annotate(f'{val:.1f}',
-                           xy=(bar.get_x() + bar.get_width() / 2, val),
-                           xytext=(0, 3),
-                           textcoords="offset points",
-                           ha='center', va='bottom', fontsize=9, fontweight='bold')
+    labels = list(data_dict.keys())
+    values = list(data_dict.values())
+    
+    colors = ['#00B4D8', '#FF6B6B', '#4ECDC4', '#FFB347', '#9B59B6']
+    bars = ax.bar(labels, values, color=colors[:len(labels)])
+    ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
+    ax.set_ylabel(ylabel, fontsize=11)
+    ax.set_xlabel(xlabel, fontsize=11)
+    
+    for bar, val in zip(bars, values):
+        if val > 0:
+            ax.annotate(f'{val:.1f}',
+                       xy=(bar.get_x() + bar.get_width() / 2, val),
+                       xytext=(0, 3),
+                       textcoords="offset points",
+                       ha='center', va='bottom', fontsize=9, fontweight='bold')
     
     ax.grid(True, linestyle='--', alpha=0.3)
     fig.patch.set_facecolor('white')
     ax.set_facecolor('#F8F9FA')
     plt.tight_layout()
     
-    tmp_path = tempfile.mktemp(suffix=".png")
-    fig.savefig(tmp_path, dpi=150, bbox_inches='tight')
+    # Guardar a bytes
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    buf.seek(0)
     plt.close(fig)
-    return tmp_path
+    return buf
 
-def generate_narrative_monthly(df_cloud, energia_total, costo_kwh):
-    """Genera narrativa contextual para PDF mensual"""
-    narrative = []
+def create_line_chart_png(data_dict, title, xlabel='Date', ylabel='Power (kW)'):
+    """Crea gráfico de líneas y retorna como bytes"""
+    fig, ax = plt.subplots(figsize=(8, 4))
     
-    if df_cloud.empty:
-        return "No historical data available for analysis."
+    labels = list(data_dict.keys())
+    values = list(data_dict.values())
     
-    # Análisis de consumo mensual
-    avg_daily_power = df_cloud['Potencia_Promedio_kW'].mean()
-    max_daily_power = df_cloud['Potencia_Promedio_kW'].max()
-    min_daily_power = df_cloud['Potencia_Promedio_kW'].min()
+    # Convertir labels a string para evitar problemas
+    x_pos = range(len(labels))
     
-    # Mejor y peor día
-    best_day_idx = df_cloud['Potencia_Promedio_kW'].idxmin()
-    worst_day_idx = df_cloud['Potencia_Promedio_kW'].idxmax()
-    best_day = df_cloud.loc[best_day_idx, 'Día']
-    worst_day = df_cloud.loc[worst_day_idx, 'Día']
+    ax.plot(x_pos, values, color='#00B4D8', marker='o', markersize=6, linewidth=2)
+    ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
+    ax.set_ylabel(ylabel, fontsize=11)
+    ax.set_xlabel(xlabel, fontsize=11)
     
-    narrative.append(f"**Monthly Executive Summary**\n\n")
-    narrative.append(f"During the analyzed month, the facility recorded an average daily consumption of ")
-    narrative.append(f"{avg_daily_power:.2f} kW, with peak daily consumption reaching {max_daily_power:.2f} kW ")
-    narrative.append(f"and minimums of {min_daily_power:.2f} kW.\n\n")
+    # Configurar etiquetas del eje X
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
     
-    narrative.append(f"The total estimated energy consumption for the month was {energia_total:,.2f} kWh, ")
-    narrative.append(f"with an estimated cost of ${energia_total * costo_kwh:,.2f} MXN.\n\n")
+    # Marcar picos
+    if values:
+        threshold = np.mean(values) * 1.2
+        for i, val in enumerate(values):
+            if val > threshold:
+                ax.scatter(i, val, color='red', s=100, edgecolors='white', zorder=5)
+                ax.annotate(f'{val:.1f}',
+                           xy=(i, val),
+                           xytext=(0, 10),
+                           textcoords="offset points",
+                           ha='center', va='bottom', color='red', fontsize=9, fontweight='bold')
     
-    narrative.append(f"**Key Findings:**\n")
-    narrative.append(f"• Most efficient day: {best_day.strftime('%B %d, %Y')} with {df_cloud.loc[best_day_idx, 'Potencia_Promedio_kW']:.2f} kW average\n")
-    narrative.append(f"• Highest consumption day: {worst_day.strftime('%B %d, %Y')} with {df_cloud.loc[worst_day_idx, 'Potencia_Promedio_kW']:.2f} kW average\n")
+    ax.grid(True, linestyle='--', alpha=0.3)
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('#F8F9FA')
+    plt.tight_layout()
     
-    # Tendencia
-    if len(df_cloud) >= 7:
-        first_week_avg = df_cloud.head(7)['Potencia_Promedio_kW'].mean()
-        last_week_avg = df_cloud.tail(7)['Potencia_Promedio_kW'].mean()
-        if last_week_avg > first_week_avg * 1.1:
-            narrative.append(f"• ⚠️ Increasing trend detected: Last week consumption {last_week_avg:.1f} kW vs {first_week_avg:.1f} kW at month start\n")
-        elif last_week_avg < first_week_avg * 0.9:
-            narrative.append(f"• ✅ Improving efficiency: Last week consumption decreased to {last_week_avg:.1f} kW\n")
-    
-    narrative.append(f"\n**Recommendations:**\n")
-    
-    if max_daily_power > avg_daily_power * 1.3:
-        narrative.append(f"• Investigate operations on {worst_day.strftime('%B %d, %Y')} which showed {max_daily_power - avg_daily_power:.1f} kW above average\n")
-    
-    narrative.append(f"• Implement continuous monitoring to identify consumption patterns\n")
-    narrative.append(f"• Consider load balancing during peak days to reduce demand charges\n")
-    
-    return "".join(narrative)
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
 
 # --- FUNCIONES DE CARGA Y PROCESAMIENTO ---
 
@@ -258,7 +251,7 @@ def sanitize_pdf(text: str) -> str:
 
 # --- RENDERIZADOS DE SECCIONES ---
 
-def render_kpi_dashboard(df_filtered, time_col, amp_col, energia_total, costo_kwh):
+def render_kpi_dashboard(df_filtered, time_col, amp_col, energia_total):
     st.markdown("<h2 align='center' style='color:#00B4D8;'>📊 Principal Dashboard & KPIs</h2>", unsafe_allow_html=True)
     st.write("Executive snapshot of the electrical footprint for the selected period.")
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -272,7 +265,7 @@ def render_kpi_dashboard(df_filtered, time_col, amp_col, energia_total, costo_kw
     st.markdown("---")
     worst_shift = df_filtered.groupby('Turno')['kW_Instant'].mean().idxmax()
     best_shift  = df_filtered.groupby('Turno')['kW_Instant'].mean().idxmin()
-    costo_total = energia_total * costo_kwh
+    costo_total = energia_total * COSTO_KWH
     variability = df_filtered['kW_Instant'].std() / df_filtered['kW_Instant'].mean()
     peak_hours  = df_filtered.groupby('Hora')['kW_Instant'].max().nlargest(3)
     col_a, col_b, col_c = st.columns(3)
@@ -280,7 +273,7 @@ def render_kpi_dashboard(df_filtered, time_col, amp_col, energia_total, costo_kw
         st.info(f"**🎯 Instant Diagnostics**\n- **Most Critical Shift:** Shift {worst_shift}\n- **Most Efficient Shift:** Shift {best_shift}")
     with col_b:
         st.metric("📉 Consumption Variability", f"{variability:.2%}")
-        st.metric("💵 Estimated Cost", f"${costo_total:,.2f} MXN")
+        st.metric("💵 Estimated Cost", f"${costo_total:,.2f} MXN @ ${COSTO_KWH}/kWh")
     with col_c:
         peak_list = "\n".join([f"- **{int(hr):02d}:00** → {val:.1f} kW" for hr, val in peak_hours.items()])
         st.markdown(f"**⏰ Peak Demand Hours:**\n{peak_list}")
@@ -342,39 +335,22 @@ def render_analisis_turnos(df_filtered, voltage_type):
     fig_hourly.update_layout(template="plotly_dark")
     st.plotly_chart(fig_hourly, use_container_width=True)
 
-# --- PDF MENSUAL CORREGIDO (SOLO DATOS DE SUPABASE) ---
-@st.fragment
-def render_pdf_monthly_exporter(df_cloud, costo_kwh):
-    """PDF exporter para datos mensuales de Supabase"""
-    st.markdown("<h2 align='center' style='color:#00FFAA;'>📄 Monthly Executive PDF Report</h2>", unsafe_allow_html=True)
-    
-    if not PDF_ENABLED:
-        st.warning("PDF generation requires fpdf and matplotlib")
-        return
-    
-    if df_cloud.empty:
-        st.warning("No monthly data available. Use Cloud Sync first.")
-        return
-    
-    if st.button("📑 Generate Monthly Report", use_container_width=True, key="pdf_monthly_btn"):
-        with st.spinner("Generating monthly executive report..."):
+# --- PDF CORREGIDOS ---
+def render_pdf_daily(df_filt, t_col, energia_total):
+    """PDF Diario CORREGIDO"""
+    if st.button("📑 Generate Daily Report", use_container_width=True, key="pdf_daily_btn"):
+        with st.spinner("Generating daily report..."):
             try:
-                # Calcular energía total mensual estimada
-                energia_total_mensual = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
+                # Datos por turno
+                shift_data = df_filt.groupby('Turno')['kW_Instant'].mean().to_dict()
+                shift_data = {f"Shift {k}": v for k, v in shift_data.items()}
+                bar_img = create_bar_chart_png(shift_data, 'Average Power per Shift', 'Shift', 'Power (kW)')
                 
-                # Crear gráfica de tendencia diaria
-                daily_data = df_cloud.set_index('Día')['Potencia_Promedio_kW'].to_dict()
-                # Tomar últimos 15 días o todos si son menos
-                daily_items = list(daily_data.items())[-15:]
-                bar_img = create_pdf_chart_simple(dict(daily_items), 'Figure 1: Daily Average Power Trend', 'bar')
-                
-                # Crear gráfica de picos diarios
-                peak_data = df_cloud.set_index('Día')['Pico_Maximo_kW'].to_dict()
-                peak_items = list(peak_data.items())[-15:]
-                peak_img = create_pdf_chart_simple(dict(peak_items), 'Figure 2: Daily Peak Demand Records', 'bar')
-                
-                # Generar narrativa mensual
-                narrative = generate_narrative_monthly(df_cloud, energia_total_mensual, costo_kwh)
+                # Datos diarios
+                daily_data = df_filt.groupby('Día')['kW_Instant'].mean().to_dict()
+                # Formatear fechas
+                daily_data_formatted = {k.strftime('%m/%d'): v for k, v in list(daily_data.items())[-10:]}
+                line_img = create_line_chart_png(daily_data_formatted, 'Daily Average Power Trend', 'Date', 'Power (kW)')
                 
                 # Crear PDF
                 pdf = ExecutivePDF()
@@ -383,79 +359,177 @@ def render_pdf_monthly_exporter(df_cloud, costo_kwh):
                 # Título
                 pdf.set_font('Helvetica', 'B', 14)
                 pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 10, "1. Monthly Executive Summary", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(0, 10, "Daily Executive Summary", new_x="LMARGIN", new_y="NEXT")
                 
                 # Narrativa
                 pdf.set_font('Helvetica', '', 10)
                 pdf.set_text_color(40, 40, 40)
-                narrative_clean = sanitize_pdf(narrative)
-                for line in narrative_clean.split('\n'):
-                    if line.strip():
-                        pdf.multi_cell(0, 5, line.strip())
-                        pdf.ln(1)
+                fecha_inicio = df_filt[t_col].min().strftime('%B %d, %Y')
+                fecha_fin = df_filt[t_col].max().strftime('%B %d, %Y')
+                costo_total = energia_total * COSTO_KWH
                 
+                narrative = f"Period: {fecha_inicio} to {fecha_fin}. Total Energy: {energia_total:,.2f} kWh. Estimated Cost: ${costo_total:,.2f} MXN (${COSTO_KWH}/kWh)."
+                pdf.multi_cell(0, 6, sanitize_pdf(narrative))
                 pdf.ln(5)
                 
                 # Gráfica 1
                 pdf.set_font('Helvetica', 'B', 11)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "Daily Performance Trends", new_x="LMARGIN", new_y="NEXT")
-                pdf.image(bar_img, w=180)
+                pdf.cell(0, 8, "Figure 1: Power Distribution by Shift", new_x="LMARGIN", new_y="NEXT")
+                pdf.image(bar_img, x=10, w=190)
                 
-                # Nueva página para gráfica 2
+                # Nueva página
                 pdf.add_page()
-                pdf.image(peak_img, w=180)
-                pdf.ln(5)
-                
-                # Tabla de resumen mensual
                 pdf.set_font('Helvetica', 'B', 11)
-                pdf.cell(0, 8, "Monthly Summary Table", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(0, 8, "Figure 2: Daily Consumption Trend", new_x="LMARGIN", new_y="NEXT")
+                pdf.image(line_img, x=10, w=190)
+                
+                # Tabla resumen
+                pdf.add_page()
+                pdf.set_font('Helvetica', 'B', 11)
+                pdf.cell(0, 8, "Executive Summary Table", new_x="LMARGIN", new_y="NEXT")
                 
                 pdf.set_font('Helvetica', '', 9)
-                summary_data = [
-                    ["Analysis Period", f"{df_cloud['Día'].min().strftime('%B %d, %Y')} to {df_cloud['Día'].max().strftime('%B %d, %Y')}"],
-                    ["Total Days Analyzed", f"{len(df_cloud)}"],
-                    ["Total Energy (kWh)", f"{energia_total_mensual:,.2f} kWh"],
-                    ["Avg Daily Power", f"{df_cloud['Potencia_Promedio_kW'].mean():.2f} kW"],
-                    ["Max Daily Peak", f"{df_cloud['Pico_Maximo_kW'].max():.2f} kW"],
-                    ["Min Daily Power", f"{df_cloud['Potencia_Promedio_kW'].min():.2f} kW"],
-                    ["Estimated Cost", f"${energia_total_mensual * costo_kwh:,.2f} MXN"],
+                summary = [
+                    ["Analysis Period", f"{fecha_inicio} to {fecha_fin}"],
+                    ["Total Records", f"{len(df_filt):,}"],
+                    ["Total Energy", f"{energia_total:,.2f} kWh"],
+                    ["Average Power", f"{df_filt['kW_Instant'].mean():.2f} kW"],
+                    ["Maximum Peak", f"{df_filt['kW_Instant'].max():.2f} kW"],
+                    ["Energy Cost", f"${costo_total:,.2f} MXN"],
+                    ["Rate per kWh", f"${COSTO_KWH} MXN"],
                     ["Report Date", datetime.now().strftime('%B %d, %Y at %H:%M')]
                 ]
                 
-                for row in summary_data:
+                for row in summary:
                     pdf.set_font('Helvetica', 'B', 9)
                     pdf.cell(55, 7, row[0], border=1)
                     pdf.set_font('Helvetica', '', 9)
                     pdf.cell(0, 7, sanitize_pdf(row[1]), border=1, new_x="LMARGIN", new_y="NEXT")
                 
-                # Guardar PDF
+                # Guardar
                 pdf_bytes = bytes(pdf.output())
-                
-                # Limpiar archivos temporales
-                try:
-                    os.remove(bar_img)
-                    os.remove(peak_img)
-                except:
-                    pass
-                
-                st.success("✅ Monthly report generated successfully!")
-                st.balloons()
+                st.success("✅ Daily report generated successfully!")
                 st.download_button(
-                    label="📥 Download Monthly PDF Report",
+                    label="📥 Download Daily PDF Report",
                     data=pdf_bytes,
-                    file_name=f"Monthly_Report_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    file_name=f"Daily_Report_{datetime.now().strftime('%Y%m%d')}.pdf",
                     mime="application/pdf"
                 )
                 
             except Exception as e:
-                st.error(f"Error generating PDF: {str(e)}")
+                st.error(f"Error: {str(e)}")
+
+def render_pdf_monthly(df_cloud):
+    """PDF Mensual CORREGIDO desde Supabase"""
+    if not PDF_ENABLED:
+        st.warning("PDF generation requires fpdf and matplotlib")
+        return
+    
+    if df_cloud.empty:
+        st.warning("No monthly data available")
+        return
+    
+    if st.button("📑 Generate Monthly Report", use_container_width=True, key="pdf_monthly_btn"):
+        with st.spinner("Generating monthly report..."):
+            try:
+                # Calcular energía mensual
+                energia_mensual = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
+                
+                # Datos diarios
+                daily_data = df_cloud.set_index('Día')['Potencia_Promedio_kW'].to_dict()
+                daily_formatted = {k.strftime('%m/%d'): v for k, v in list(daily_data.items())[-15:]}
+                bar_img = create_bar_chart_png(daily_formatted, 'Daily Average Power Trend', 'Date', 'Power (kW)')
+                
+                # Datos de picos
+                peak_data = df_cloud.set_index('Día')['Pico_Maximo_kW'].to_dict()
+                peak_formatted = {k.strftime('%m/%d'): v for k, v in list(peak_data.items())[-15:]}
+                line_img = create_line_chart_png(peak_formatted, 'Daily Peak Demand', 'Date', 'Power (kW)')
+                
+                # Crear PDF
+                pdf = ExecutivePDF()
+                pdf.add_page()
+                
+                # Título
+                pdf.set_font('Helvetica', 'B', 14)
+                pdf.set_text_color(0, 180, 216)
+                pdf.cell(0, 10, "Monthly Executive Summary", new_x="LMARGIN", new_y="NEXT")
+                
+                # Narrativa
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                fecha_inicio = df_cloud['Día'].min().strftime('%B %d, %Y')
+                fecha_fin = df_cloud['Día'].max().strftime('%B %d, %Y')
+                costo_total = energia_mensual * COSTO_KWH
+                
+                narrative = f"Period: {fecha_inicio} to {fecha_fin}. Total Energy: {energia_mensual:,.2f} kWh. Estimated Cost: ${costo_total:,.2f} MXN (${COSTO_KWH}/kWh)."
+                pdf.multi_cell(0, 6, sanitize_pdf(narrative))
+                pdf.ln(5)
+                
+                # Estadísticas mensuales
+                pdf.set_font('Helvetica', 'B', 11)
+                pdf.cell(0, 8, "Monthly Statistics", new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font('Helvetica', '', 10)
+                
+                stats = f"• Average Daily Power: {df_cloud['Potencia_Promedio_kW'].mean():.2f} kW\n"
+                stats += f"• Maximum Daily Peak: {df_cloud['Pico_Maximo_kW'].max():.2f} kW\n"
+                stats += f"• Minimum Daily Power: {df_cloud['Potencia_Promedio_kW'].min():.2f} kW\n"
+                stats += f"• Total Days Analyzed: {len(df_cloud)}"
+                pdf.multi_cell(0, 6, sanitize_pdf(stats))
+                pdf.ln(5)
+                
+                # Gráfica 1
+                pdf.set_font('Helvetica', 'B', 11)
+                pdf.cell(0, 8, "Figure 1: Daily Average Power", new_x="LMARGIN", new_y="NEXT")
+                pdf.image(bar_img, x=10, w=190)
+                
+                # Nueva página
+                pdf.add_page()
+                pdf.set_font('Helvetica', 'B', 11)
+                pdf.cell(0, 8, "Figure 2: Daily Peak Demand", new_x="LMARGIN", new_y="NEXT")
+                pdf.image(line_img, x=10, w=190)
+                
+                # Tabla resumen
+                pdf.add_page()
+                pdf.set_font('Helvetica', 'B', 11)
+                pdf.cell(0, 8, "Monthly Summary Table", new_x="LMARGIN", new_y="NEXT")
+                
+                pdf.set_font('Helvetica', '', 9)
+                summary = [
+                    ["Analysis Period", f"{fecha_inicio} to {fecha_fin}"],
+                    ["Total Days", f"{len(df_cloud)}"],
+                    ["Total Energy", f"{energia_mensual:,.2f} kWh"],
+                    ["Avg Daily Power", f"{df_cloud['Potencia_Promedio_kW'].mean():.2f} kW"],
+                    ["Max Daily Peak", f"{df_cloud['Pico_Maximo_kW'].max():.2f} kW"],
+                    ["Min Daily Power", f"{df_cloud['Potencia_Promedio_kW'].min():.2f} kW"],
+                    ["Energy Cost", f"${costo_total:,.2f} MXN"],
+                    ["Rate per kWh", f"${COSTO_KWH} MXN"],
+                    ["Report Date", datetime.now().strftime('%B %d, %Y at %H:%M')]
+                ]
+                
+                for row in summary:
+                    pdf.set_font('Helvetica', 'B', 9)
+                    pdf.cell(55, 7, row[0], border=1)
+                    pdf.set_font('Helvetica', '', 9)
+                    pdf.cell(0, 7, sanitize_pdf(row[1]), border=1, new_x="LMARGIN", new_y="NEXT")
+                
+                # Guardar
+                pdf_bytes = bytes(pdf.output())
+                st.success("✅ Monthly report generated successfully!")
+                st.download_button(
+                    label="📥 Download Monthly PDF Report",
+                    data=pdf_bytes,
+                    file_name=f"Monthly_Report_{datetime.now().strftime('%Y%m')}.pdf",
+                    mime="application/pdf"
+                )
+                
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
 
 @st.fragment
-def render_monthly_insights(costo_kwh):
+def render_monthly_insights():
     st.markdown("<h2 align='center' style='color:#7F56D9;'>📅 Monthly Cloud Analysis (Supabase)</h2>", unsafe_allow_html=True)
     if not supabase_client:
-        st.warning("Cloud Sync is not configured. Add Supabase credentials to secrets.")
+        st.warning("Cloud Sync is not configured.")
         return
     
     with st.spinner("Fetching historical data..."):
@@ -463,32 +537,26 @@ def render_monthly_insights(costo_kwh):
             response = supabase_client.table('hobo_monthly_sync').select("*").order("Día", desc=False).execute()
             cloud_raw = response.data
             if not cloud_raw:
-                st.info("No historical data found. Use Cloud Sync to upload data first.")
+                st.info("No historical data found. Use Cloud Sync first.")
                 return
             
             df_cloud = pd.DataFrame(cloud_raw)
             df_cloud['Día'] = pd.to_datetime(df_cloud['Día'])
             
-            # Mostrar KPIs mensuales
             col1, col2, col3, col4 = st.columns(4)
+            energia_mensual = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
             with col1: st.metric("Total Days", len(df_cloud))
             with col2: st.metric("Monthly Avg Power", f"{df_cloud['Potencia_Promedio_kW'].mean():.2f} kW")
             with col3: st.metric("Absolute Peak", f"{df_cloud['Pico_Maximo_kW'].max():.2f} kW")
-            with col4: 
-                energia_mensual = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
-                st.metric("Total Energy", f"{energia_mensual:.0f} kWh")
+            with col4: st.metric("Total Energy", f"{energia_mensual:.0f} kWh")
             
-            # Gráfica de tendencia
             fig = px.bar(df_cloud, x='Día', y='Potencia_Promedio_kW', 
                         template="plotly_dark", 
-                        title="Daily Average Power Trend",
-                        labels={'Potencia_Promedio_kW': 'Power (kW)', 'Día': 'Date'})
-            fig.add_scatter(x=df_cloud['Día'], y=df_cloud['Pico_Maximo_kW'], 
-                           mode='lines+markers', name='Daily Peak', line=dict(color='orange', dash='dot'))
+                        title="Daily Average Power Trend")
             st.plotly_chart(fig, use_container_width=True)
             
-            # Botón para PDF mensual
-            render_pdf_monthly_exporter(df_cloud, costo_kwh)
+            # PDF mensual
+            render_pdf_monthly(df_cloud)
             
         except Exception as e:
             st.error(f"Cloud fetch failed: {str(e)}")
@@ -501,20 +569,16 @@ def render_cloud_sync(df_filtered):
         return
     
     if st.button("🚀 Push to Supabase Cloud", type="primary"):
-        with st.spinner("Uploading to cloud..."):
+        with st.spinner("Uploading..."):
             try:
-                # Verificar si ya existen datos para evitar duplicados
                 daily_data = df_filtered.groupby('Día').agg(
                     Potencia_Promedio_kW=('kW_Instant', 'mean'),
                     Pico_Maximo_kW=('kW_Instant', 'max')
                 ).reset_index()
                 daily_data['Día'] = daily_data['Día'].astype(str)
-                
-                # Insertar datos
                 supabase_client.table('hobo_monthly_sync').insert(daily_data.to_dict(orient='records')).execute()
-                st.success("✅ Successfully synchronized with cloud!")
+                st.success("✅ Successfully synchronized!")
                 st.balloons()
-                st.rerun()
             except Exception as ex:
                 st.error(f"Sync failed: {str(ex)}")
 
@@ -560,16 +624,14 @@ else:
             )
             st.markdown("---")
             with st.expander("⚙️ Electric Parameters", expanded=True):
-                volt = st.selectbox("Voltage (VL-L):", [480, 220, 110], index=0, key="volt_select")
-                pf = st.number_input("Power Factor (PF):", 0.5, 1.0, 0.9, 0.01, key="pf_input")
-                costo_kwh = 2.85  # Precio fijo en MXN
-                st.info(f"💵 kWh Price: $2.85 MXN (fixed rate)")
+                volt = st.selectbox("Voltage (VL-L):", [480, 220, 110], index=0)
+                pf = st.number_input("Power Factor (PF):", 0.5, 1.0, 0.9, 0.01)
+                st.info(f"💵 kWh Price: ${COSTO_KWH} MXN (fixed)")
             with st.expander("🎯 Filter Engine", expanded=True):
                 min_d, max_d = get_filter_bounds(df_raw, t_col)
-                range_d = st.date_input("Time Range:", [min_d.date(), max_d.date()], key="date_range")
-                shifts = st.multiselect("Shifts:", [1, 2, 3], default=[1, 2, 3], key="shifts_select")
-                # Slider con key único y valores por defecto
-                peak_sens = st.slider("Peak Sensitivity (%):", 80, 99, 95, 1, key="peak_sensitivity_slider")
+                range_d = st.date_input("Time Range:", [min_d.date(), max_d.date()])
+                shifts = st.multiselect("Shifts:", [1, 2, 3], default=[1, 2, 3])
+                peak_sens = st.slider("Peak Sensitivity (%):", 80, 99, 95, 1)
 
         df_proc = preprocess_electric_data(df_raw, t_col, a_col, volt, pf)
         df_filt = df_proc[df_proc['Turno'].isin(shifts)].copy()
@@ -582,55 +644,20 @@ else:
             e_total = calculate_energy_vectorized(df_filt, t_col, 'kW_Instant')
             
             if selected_page == "KPI Dashboard": 
-                render_kpi_dashboard(df_filt, t_col, a_col, e_total, costo_kwh)
+                render_kpi_dashboard(df_filt, t_col, a_col, e_total)
             elif selected_page == "Trends & Peaks": 
                 render_tendencias_picos(df_filt, t_col, a_col, peak_sens)
             elif selected_page == "Behaviors": 
                 render_analisis_turnos(df_filt, volt)
             elif selected_page == "Monthly Insights": 
-                render_monthly_insights(costo_kwh)
+                render_monthly_insights()
             elif selected_page == "Executive PDF": 
-                # PDF diario con los datos actuales
                 st.markdown("<h2 align='center' style='color:#00FFAA;'>📄 Daily Executive PDF Report</h2>", unsafe_allow_html=True)
-                if st.button("📑 Generate Daily Report", use_container_width=True, key="pdf_daily_btn"):
-                    with st.spinner("Generating daily report..."):
-                        try:
-                            shift_data = df_filt.groupby('Turno')['kW_Instant'].mean().to_dict()
-                            shift_data = {f"Shift {k}": v for k, v in shift_data.items()}
-                            bar_img = create_pdf_chart_simple(shift_data, 'Average Power per Shift', 'bar')
-                            
-                            daily_avg_data = df_filt.groupby('Día')['kW_Instant'].mean().to_dict()
-                            daily_items = list(daily_avg_data.items())[-10:]
-                            line_img = create_pdf_chart_simple(dict(daily_items), 'Daily Average Power Trend', 'bar')
-                            
-                            pdf = ExecutivePDF()
-                            pdf.add_page()
-                            pdf.set_font('Helvetica', 'B', 14)
-                            pdf.set_text_color(0, 180, 216)
-                            pdf.cell(0, 10, "Daily Executive Summary", new_x="LMARGIN", new_y="NEXT")
-                            
-                            pdf.set_font('Helvetica', '', 10)
-                            narrative = f"Period: {df_filt[t_col].min().strftime('%B %d, %Y')} to {df_filt[t_col].max().strftime('%B %d, %Y')}. Total Energy: {e_total:,.2f} kWh. Estimated Cost: ${e_total * costo_kwh:,.2f} MXN."
-                            pdf.multi_cell(0, 5, sanitize_pdf(narrative))
-                            
-                            pdf.image(bar_img, w=180)
-                            pdf.add_page()
-                            pdf.image(line_img, w=180)
-                            
-                            pdf_bytes = bytes(pdf.output())
-                            os.remove(bar_img)
-                            os.remove(line_img)
-                            
-                            st.success("✅ Daily report generated!")
-                            st.download_button("📥 Download Daily PDF", data=pdf_bytes, 
-                                             file_name=f"Daily_Report_{datetime.now().strftime('%Y%m%d')}.pdf", 
-                                             mime="application/pdf")
-                        except Exception as e:
-                            st.error(f"Error: {str(e)}")
+                render_pdf_daily(df_filt, t_col, e_total)
             elif selected_page == "Cloud Sync": 
                 render_cloud_sync(df_filt)
             
     except Exception as e:
         st.error(f"⚠️ Error: {str(e)}")
 
-st.markdown("<p style='text-align: right; color:#555; font-size:12px;'>Vector-Core Engine v5.5 | PDF Monthly Fixed | Stable Sliders</p>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: right; color:#555; font-size:12px;'>Vector-Core Engine v5.6 | PDF Fixed | Rate: $2.40/kWh</p>", unsafe_allow_html=True)
