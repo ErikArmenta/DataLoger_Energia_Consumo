@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-⚡ Enterprise Energy Analyzer v5.6 - PDF CORREGIDOS y Precio $2.40
+⚡ Enterprise Energy Analyzer v6.0 - MULTI-MACHINE with Supabase
 """
 
 import streamlit as st
@@ -34,7 +34,7 @@ except ImportError:
     PDF_ENABLED = False
 
 # --- CONFIGURACIÓN Y ESTABILIDAD ---
-st.set_page_config(page_title="EA Energy Analyzer", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="EA Energy Analyzer - Multi-Machine", layout="wide", page_icon="⚡")
 
 # Precio fijo kWh
 COSTO_KWH = 2.40  # Precio en MXN
@@ -66,10 +66,93 @@ def init_supabase():
             key = st.secrets["supabase"]["KEY"]
             return create_client(url, key)
         except Exception as e:
+            st.error(f"Supabase connection error: {e}")
             return None
     return None
 
 supabase_client = init_supabase()
+
+# --- FUNCIONES DE GESTIÓN DE MÁQUINAS ---
+
+def get_machines():
+    """Obtiene lista de todas las máquinas desde Supabase"""
+    if not supabase_client:
+        return pd.DataFrame()
+    try:
+        response = supabase_client.table('machines').select("*").order("machine_name").execute()
+        return pd.DataFrame(response.data) if response.data else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error loading machines: {e}")
+        return pd.DataFrame()
+
+def add_machine(machine_name, description=""):
+    """Agrega una nueva máquina"""
+    if not supabase_client:
+        return False
+    try:
+        supabase_client.table('machines').insert({
+            "machine_name": machine_name,
+            "description": description,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error adding machine: {e}")
+        return False
+
+def delete_machine(machine_id):
+    """Elimina una máquina y todos sus datos asociados"""
+    if not supabase_client:
+        return False
+    try:
+        # Eliminar datos de la máquina
+        supabase_client.table('hobo_monthly_sync').delete().eq('machine_id', machine_id).execute()
+        # Eliminar la máquina
+        supabase_client.table('machines').delete().eq('id', machine_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error deleting machine: {e}")
+        return False
+
+def save_machine_data(machine_id, daily_data):
+    """Guarda datos diarios de una máquina específica"""
+    if not supabase_client:
+        return False
+    try:
+        # Primero eliminar datos existentes de esta máquina para evitar duplicados
+        supabase_client.table('hobo_monthly_sync').delete().eq('machine_id', machine_id).execute()
+        
+        # Insertar nuevos datos
+        records = []
+        for _, row in daily_data.iterrows():
+            records.append({
+                "machine_id": machine_id,
+                "Día": row['Día'].strftime('%Y-%m-%d') if isinstance(row['Día'], pd.Timestamp) else str(row['Día']),
+                "Potencia_Promedio_kW": float(row['Potencia_Promedio_kW']),
+                "Pico_Maximo_kW": float(row['Pico_Maximo_kW'])
+            })
+        
+        if records:
+            supabase_client.table('hobo_monthly_sync').insert(records).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error saving machine data: {e}")
+        return False
+
+def load_machine_data(machine_id):
+    """Carga los datos históricos de una máquina específica"""
+    if not supabase_client or not machine_id:
+        return pd.DataFrame()
+    try:
+        response = supabase_client.table('hobo_monthly_sync').select("*").eq('machine_id', machine_id).order("Día", desc=False).execute()
+        if response.data:
+            df = pd.DataFrame(response.data)
+            df['Día'] = pd.to_datetime(df['Día'])
+            return df
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error loading machine data: {e}")
+        return pd.DataFrame()
 
 # --- FUNCIONES NÚCLEO PDF CORREGIDAS ---
 if PDF_ENABLED:
@@ -114,7 +197,6 @@ def create_bar_chart_png(data_dict, title, xlabel='Category', ylabel='Power (kW)
     ax.set_facecolor('#F8F9FA')
     plt.tight_layout()
     
-    # Guardar a bytes
     buf = BytesIO()
     fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
     buf.seek(0)
@@ -128,7 +210,6 @@ def create_line_chart_png(data_dict, title, xlabel='Date', ylabel='Power (kW)'):
     labels = list(data_dict.keys())
     values = list(data_dict.values())
     
-    # Convertir labels a string para evitar problemas
     x_pos = range(len(labels))
     
     ax.plot(x_pos, values, color='#00B4D8', marker='o', markersize=6, linewidth=2)
@@ -136,11 +217,9 @@ def create_line_chart_png(data_dict, title, xlabel='Date', ylabel='Power (kW)'):
     ax.set_ylabel(ylabel, fontsize=11)
     ax.set_xlabel(xlabel, fontsize=11)
     
-    # Configurar etiquetas del eje X
     ax.set_xticks(x_pos)
     ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
     
-    # Marcar picos
     if values:
         threshold = np.mean(values) * 1.2
         for i, val in enumerate(values):
@@ -251,8 +330,8 @@ def sanitize_pdf(text: str) -> str:
 
 # --- RENDERIZADOS DE SECCIONES ---
 
-def render_kpi_dashboard(df_filtered, time_col, amp_col, energia_total):
-    st.markdown("<h2 align='center' style='color:#00B4D8;'>📊 Principal Dashboard & KPIs</h2>", unsafe_allow_html=True)
+def render_kpi_dashboard(df_filtered, time_col, amp_col, energia_total, machine_name):
+    st.markdown(f"<h2 align='center' style='color:#00B4D8;'>📊 {machine_name} - Dashboard & KPIs</h2>", unsafe_allow_html=True)
     st.write("Executive snapshot of the electrical footprint for the selected period.")
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1: st.metric("📈 Active Records", f"{len(df_filtered):,}")
@@ -336,60 +415,52 @@ def render_analisis_turnos(df_filtered, voltage_type):
     st.plotly_chart(fig_hourly, use_container_width=True)
 
 # --- PDF CORREGIDOS ---
-def render_pdf_daily(df_filt, t_col, energia_total):
+def render_pdf_daily(df_filt, t_col, energia_total, machine_name):
     """PDF Diario CORREGIDO"""
     if st.button("📑 Generate Daily Report", use_container_width=True, key="pdf_daily_btn"):
         with st.spinner("Generating daily report..."):
             try:
-                # Datos por turno
                 shift_data = df_filt.groupby('Turno')['kW_Instant'].mean().to_dict()
                 shift_data = {f"Shift {k}": v for k, v in shift_data.items()}
                 bar_img = create_bar_chart_png(shift_data, 'Average Power per Shift', 'Shift', 'Power (kW)')
                 
-                # Datos diarios
                 daily_data = df_filt.groupby('Día')['kW_Instant'].mean().to_dict()
-                # Formatear fechas
                 daily_data_formatted = {k.strftime('%m/%d'): v for k, v in list(daily_data.items())[-10:]}
                 line_img = create_line_chart_png(daily_data_formatted, 'Daily Average Power Trend', 'Date', 'Power (kW)')
                 
-                # Crear PDF
                 pdf = ExecutivePDF()
                 pdf.add_page()
                 
-                # Título
                 pdf.set_font('Helvetica', 'B', 14)
                 pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 10, "Daily Executive Summary", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(0, 10, f"Daily Executive Summary - {machine_name}", new_x="LMARGIN", new_y="NEXT")
                 
-                # Narrativa
                 pdf.set_font('Helvetica', '', 10)
                 pdf.set_text_color(40, 40, 40)
                 fecha_inicio = df_filt[t_col].min().strftime('%B %d, %Y')
                 fecha_fin = df_filt[t_col].max().strftime('%B %d, %Y')
                 costo_total = energia_total * COSTO_KWH
                 
-                narrative = f"Period: {fecha_inicio} to {fecha_fin}. Total Energy: {energia_total:,.2f} kWh. Estimated Cost: ${costo_total:,.2f} MXN (${COSTO_KWH}/kWh)."
+                narrative = f"Machine: {machine_name}. Period: {fecha_inicio} to {fecha_fin}. Total Energy: {energia_total:,.2f} kWh. Estimated Cost: ${costo_total:,.2f} MXN (${COSTO_KWH}/kWh)."
                 pdf.multi_cell(0, 6, sanitize_pdf(narrative))
                 pdf.ln(5)
                 
-                # Gráfica 1
                 pdf.set_font('Helvetica', 'B', 11)
                 pdf.cell(0, 8, "Figure 1: Power Distribution by Shift", new_x="LMARGIN", new_y="NEXT")
                 pdf.image(bar_img, x=10, w=190)
                 
-                # Nueva página
                 pdf.add_page()
                 pdf.set_font('Helvetica', 'B', 11)
                 pdf.cell(0, 8, "Figure 2: Daily Consumption Trend", new_x="LMARGIN", new_y="NEXT")
                 pdf.image(line_img, x=10, w=190)
                 
-                # Tabla resumen
                 pdf.add_page()
                 pdf.set_font('Helvetica', 'B', 11)
                 pdf.cell(0, 8, "Executive Summary Table", new_x="LMARGIN", new_y="NEXT")
                 
                 pdf.set_font('Helvetica', '', 9)
                 summary = [
+                    ["Machine", machine_name],
                     ["Analysis Period", f"{fecha_inicio} to {fecha_fin}"],
                     ["Total Records", f"{len(df_filt):,}"],
                     ["Total Energy", f"{energia_total:,.2f} kWh"],
@@ -406,20 +477,19 @@ def render_pdf_daily(df_filt, t_col, energia_total):
                     pdf.set_font('Helvetica', '', 9)
                     pdf.cell(0, 7, sanitize_pdf(row[1]), border=1, new_x="LMARGIN", new_y="NEXT")
                 
-                # Guardar
                 pdf_bytes = bytes(pdf.output())
                 st.success("✅ Daily report generated successfully!")
                 st.download_button(
                     label="📥 Download Daily PDF Report",
                     data=pdf_bytes,
-                    file_name=f"Daily_Report_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    file_name=f"Daily_Report_{machine_name}_{datetime.now().strftime('%Y%m%d')}.pdf",
                     mime="application/pdf"
                 )
                 
             except Exception as e:
                 st.error(f"Error: {str(e)}")
 
-def render_pdf_monthly(df_cloud):
+def render_pdf_monthly(df_cloud, machine_name):
     """PDF Mensual CORREGIDO desde Supabase"""
     if not PDF_ENABLED:
         st.warning("PDF generation requires fpdf and matplotlib")
@@ -432,40 +502,33 @@ def render_pdf_monthly(df_cloud):
     if st.button("📑 Generate Monthly Report", use_container_width=True, key="pdf_monthly_btn"):
         with st.spinner("Generating monthly report..."):
             try:
-                # Calcular energía mensual
                 energia_mensual = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
                 
-                # Datos diarios
                 daily_data = df_cloud.set_index('Día')['Potencia_Promedio_kW'].to_dict()
                 daily_formatted = {k.strftime('%m/%d'): v for k, v in list(daily_data.items())[-15:]}
                 bar_img = create_bar_chart_png(daily_formatted, 'Daily Average Power Trend', 'Date', 'Power (kW)')
                 
-                # Datos de picos
                 peak_data = df_cloud.set_index('Día')['Pico_Maximo_kW'].to_dict()
                 peak_formatted = {k.strftime('%m/%d'): v for k, v in list(peak_data.items())[-15:]}
                 line_img = create_line_chart_png(peak_formatted, 'Daily Peak Demand', 'Date', 'Power (kW)')
                 
-                # Crear PDF
                 pdf = ExecutivePDF()
                 pdf.add_page()
                 
-                # Título
                 pdf.set_font('Helvetica', 'B', 14)
                 pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 10, "Monthly Executive Summary", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(0, 10, f"Monthly Executive Summary - {machine_name}", new_x="LMARGIN", new_y="NEXT")
                 
-                # Narrativa
                 pdf.set_font('Helvetica', '', 10)
                 pdf.set_text_color(40, 40, 40)
                 fecha_inicio = df_cloud['Día'].min().strftime('%B %d, %Y')
                 fecha_fin = df_cloud['Día'].max().strftime('%B %d, %Y')
                 costo_total = energia_mensual * COSTO_KWH
                 
-                narrative = f"Period: {fecha_inicio} to {fecha_fin}. Total Energy: {energia_mensual:,.2f} kWh. Estimated Cost: ${costo_total:,.2f} MXN (${COSTO_KWH}/kWh)."
+                narrative = f"Machine: {machine_name}. Period: {fecha_inicio} to {fecha_fin}. Total Energy: {energia_mensual:,.2f} kWh. Estimated Cost: ${costo_total:,.2f} MXN (${COSTO_KWH}/kWh)."
                 pdf.multi_cell(0, 6, sanitize_pdf(narrative))
                 pdf.ln(5)
                 
-                # Estadísticas mensuales
                 pdf.set_font('Helvetica', 'B', 11)
                 pdf.cell(0, 8, "Monthly Statistics", new_x="LMARGIN", new_y="NEXT")
                 pdf.set_font('Helvetica', '', 10)
@@ -477,24 +540,22 @@ def render_pdf_monthly(df_cloud):
                 pdf.multi_cell(0, 6, sanitize_pdf(stats))
                 pdf.ln(5)
                 
-                # Gráfica 1
                 pdf.set_font('Helvetica', 'B', 11)
                 pdf.cell(0, 8, "Figure 1: Daily Average Power", new_x="LMARGIN", new_y="NEXT")
                 pdf.image(bar_img, x=10, w=190)
                 
-                # Nueva página
                 pdf.add_page()
                 pdf.set_font('Helvetica', 'B', 11)
                 pdf.cell(0, 8, "Figure 2: Daily Peak Demand", new_x="LMARGIN", new_y="NEXT")
                 pdf.image(line_img, x=10, w=190)
                 
-                # Tabla resumen
                 pdf.add_page()
                 pdf.set_font('Helvetica', 'B', 11)
                 pdf.cell(0, 8, "Monthly Summary Table", new_x="LMARGIN", new_y="NEXT")
                 
                 pdf.set_font('Helvetica', '', 9)
                 summary = [
+                    ["Machine", machine_name],
                     ["Analysis Period", f"{fecha_inicio} to {fecha_fin}"],
                     ["Total Days", f"{len(df_cloud)}"],
                     ["Total Energy", f"{energia_mensual:,.2f} kWh"],
@@ -512,13 +573,12 @@ def render_pdf_monthly(df_cloud):
                     pdf.set_font('Helvetica', '', 9)
                     pdf.cell(0, 7, sanitize_pdf(row[1]), border=1, new_x="LMARGIN", new_y="NEXT")
                 
-                # Guardar
                 pdf_bytes = bytes(pdf.output())
                 st.success("✅ Monthly report generated successfully!")
                 st.download_button(
                     label="📥 Download Monthly PDF Report",
                     data=pdf_bytes,
-                    file_name=f"Monthly_Report_{datetime.now().strftime('%Y%m')}.pdf",
+                    file_name=f"Monthly_Report_{machine_name}_{datetime.now().strftime('%Y%m')}.pdf",
                     mime="application/pdf"
                 )
                 
@@ -526,61 +586,102 @@ def render_pdf_monthly(df_cloud):
                 st.error(f"Error: {str(e)}")
 
 @st.fragment
-def render_monthly_insights():
-    st.markdown("<h2 align='center' style='color:#7F56D9;'>📅 Monthly Cloud Analysis (Supabase)</h2>", unsafe_allow_html=True)
-    if not supabase_client:
-        st.warning("Cloud Sync is not configured.")
+def render_monthly_insights(df_cloud, machine_name):
+    st.markdown(f"<h2 align='center' style='color:#7F56D9;'>📅 Monthly Analysis - {machine_name}</h2>", unsafe_allow_html=True)
+    
+    if df_cloud.empty:
+        st.info(f"No historical data found for {machine_name}. Upload data first using Cloud Sync.")
         return
     
-    with st.spinner("Fetching historical data..."):
-        try:
-            response = supabase_client.table('hobo_monthly_sync').select("*").order("Día", desc=False).execute()
-            cloud_raw = response.data
-            if not cloud_raw:
-                st.info("No historical data found. Use Cloud Sync first.")
-                return
-            
-            df_cloud = pd.DataFrame(cloud_raw)
-            df_cloud['Día'] = pd.to_datetime(df_cloud['Día'])
-            
-            col1, col2, col3, col4 = st.columns(4)
-            energia_mensual = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
-            with col1: st.metric("Total Days", len(df_cloud))
-            with col2: st.metric("Monthly Avg Power", f"{df_cloud['Potencia_Promedio_kW'].mean():.2f} kW")
-            with col3: st.metric("Absolute Peak", f"{df_cloud['Pico_Maximo_kW'].max():.2f} kW")
-            with col4: st.metric("Total Energy", f"{energia_mensual:.0f} kWh")
-            
-            fig = px.bar(df_cloud, x='Día', y='Potencia_Promedio_kW', 
-                        template="plotly_dark", 
-                        title="Daily Average Power Trend")
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # PDF mensual
-            render_pdf_monthly(df_cloud)
-            
-        except Exception as e:
-            st.error(f"Cloud fetch failed: {str(e)}")
+    col1, col2, col3, col4 = st.columns(4)
+    energia_mensual = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
+    with col1: st.metric("Total Days", len(df_cloud))
+    with col2: st.metric("Monthly Avg Power", f"{df_cloud['Potencia_Promedio_kW'].mean():.2f} kW")
+    with col3: st.metric("Absolute Peak", f"{df_cloud['Pico_Maximo_kW'].max():.2f} kW")
+    with col4: st.metric("Total Energy", f"{energia_mensual:.0f} kWh")
+    
+    fig = px.bar(df_cloud, x='Día', y='Potencia_Promedio_kW', 
+                template="plotly_dark", 
+                title="Daily Average Power Trend")
+    st.plotly_chart(fig, use_container_width=True)
+    
+    render_pdf_monthly(df_cloud, machine_name)
 
 @st.fragment
-def render_cloud_sync(df_filtered):
-    st.markdown("<h2 align='center' style='color:#7F56D9;'>☁️ Cloud Data Synchronization</h2>", unsafe_allow_html=True)
+def render_cloud_sync(df_filtered, machine_id, machine_name):
+    st.markdown(f"<h2 align='center' style='color:#7F56D9;'>☁️ Cloud Sync - {machine_name}</h2>", unsafe_allow_html=True)
+    
     if not supabase_client:
         st.warning("Supabase client not available.")
         return
     
-    if st.button("🚀 Push to Supabase Cloud", type="primary"):
-        with st.spinner("Uploading..."):
+    if df_filtered.empty:
+        st.warning("No data to sync. Please upload a file first.")
+        return
+    
+    if st.button("🚀 Save to Supabase Cloud", type="primary"):
+        with st.spinner(f"Saving {machine_name} data..."):
             try:
                 daily_data = df_filtered.groupby('Día').agg(
                     Potencia_Promedio_kW=('kW_Instant', 'mean'),
                     Pico_Maximo_kW=('kW_Instant', 'max')
                 ).reset_index()
-                daily_data['Día'] = daily_data['Día'].astype(str)
-                supabase_client.table('hobo_monthly_sync').insert(daily_data.to_dict(orient='records')).execute()
-                st.success("✅ Successfully synchronized!")
-                st.balloons()
+                
+                if save_machine_data(machine_id, daily_data):
+                    st.success(f"✅ {machine_name} data saved successfully!")
+                    st.balloons()
+                else:
+                    st.error("Failed to save data")
             except Exception as ex:
                 st.error(f"Sync failed: {str(ex)}")
+
+# --- SIDEBAR DE SELECCIÓN DE MÁQUINA ---
+def render_machine_selector():
+    """Renderiza el selector de máquinas en el sidebar"""
+    st.sidebar.markdown("### 🏭 Machine Management")
+    
+    # Obtener máquinas existentes
+    machines_df = get_machines()
+    
+    # Crear nueva máquina
+    with st.sidebar.expander("➕ Add New Machine", expanded=False):
+        new_machine_name = st.text_input("Machine Name", key="new_machine_name")
+        new_machine_desc = st.text_area("Description (optional)", key="new_machine_desc")
+        if st.button("Create Machine", key="create_machine_btn"):
+            if new_machine_name:
+                if add_machine(new_machine_name, new_machine_desc):
+                    st.success(f"Machine '{new_machine_name}' created!")
+                    st.rerun()
+            else:
+                st.warning("Please enter a machine name")
+    
+    # Selector de máquina
+    if not machines_df.empty:
+        machine_options = {row['machine_name']: row['id'] for _, row in machines_df.iterrows()}
+        selected_machine_name = st.sidebar.selectbox(
+            "Select Machine",
+            options=list(machine_options.keys()),
+            key="machine_selector"
+        )
+        selected_machine_id = machine_options[selected_machine_name]
+        
+        # Mostrar info de máquina seleccionada
+        machine_info = machines_df[machines_df['id'] == selected_machine_id].iloc[0]
+        if machine_info.get('description'):
+            st.sidebar.caption(f"📝 {machine_info['description']}")
+        
+        # Botón para eliminar máquina
+        with st.sidebar.expander("⚠️ Delete Machine", expanded=False):
+            st.warning(f"Delete '{selected_machine_name}'? This removes all its data.")
+            if st.button("🗑️ Delete This Machine", key="delete_machine_btn"):
+                if delete_machine(selected_machine_id):
+                    st.success(f"Machine '{selected_machine_name}' deleted!")
+                    st.rerun()
+        
+        return selected_machine_id, selected_machine_name
+    else:
+        st.sidebar.info("No machines created yet. Add one above!")
+        return None, None
 
 # --- MAIN APP FLOW ---
 with st.container():
@@ -593,71 +694,91 @@ with st.container():
             st.write("⚡")
     with colB: 
         st.markdown("<h1 align='center' style='padding-top:20px; font-weight:800;'>Enterprise Energy Analyzer</h1>", unsafe_allow_html=True)
-        st.markdown("<div align='center'><span style='color: #00FFAA; letter-spacing: 2px;'>POWERED BY HOBO & VECTOR-CORE ENGINE</span></div>", unsafe_allow_html=True)
+        st.markdown("<div align='center'><span style='color: #00FFAA; letter-spacing: 2px;'>POWERED BY HOBO & VECTOR-CORE ENGINE | MULTI-MACHINE</span></div>", unsafe_allow_html=True)
 
 st.markdown("---")
 
-with st.sidebar:
-    st.markdown("### 📡 Data Intake")
-    uploaded_file = st.file_uploader("Upload HOBO Report (CSV/XLSX)", type=["csv", "xlsx"])
+# --- SIDEBAR Y SELECCIÓN DE MÁQUINA ---
+machine_id, machine_name = render_machine_selector()
 
-if not uploaded_file:
+# Si no hay máquina seleccionada, mostrar mensaje
+if not machine_id:
     st.markdown("""<div style="text-align: center; padding: 50px; background-color: #1a1e23; border-radius: 15px;">
-            <h1 style="color: #4a4e53; font-size: 60px;">🚀</h1>
-            <h2 style="color: #e0e6ed;">System Ready & Waiting</h2>
-            <p style="color: #9aa0a6;">Upload your data file to begin analysis.</p>
+            <h1 style="color: #4a4e53; font-size: 60px;">🏭</h1>
+            <h2 style="color: #e0e6ed;">No Machine Selected</h2>
+            <p style="color: #9aa0a6;">Create a machine in the sidebar to start analyzing data.</p>
             </div>""", unsafe_allow_html=True)
 else:
-    try:
-        file_bytes = uploaded_file.getvalue()
-        ext = uploaded_file.name.split('.')[-1].lower()
-        df_raw, t_col, a_col = load_hobo_data_from_bytes(file_bytes, ext)
+    # Sidebar para carga de archivos y parámetros
+    with st.sidebar:
+        st.markdown(f"### 📡 Upload Data - {machine_name}")
+        uploaded_file = st.file_uploader(f"Upload HOBO Report for {machine_name} (CSV/XLSX)", type=["csv", "xlsx"], key=f"upload_{machine_id}")
+        
+        st.markdown("---")
+        selected_page = option_menu(
+            menu_title="Navigation",
+            options=["KPI Dashboard", "Behaviors", "Trends & Peaks", "Monthly Insights", "Executive PDF", "Cloud Sync"],
+            icons=["layers", "pie-chart", "activity", "calendar-month", "file-earmark-pdf", "cloud-arrow-up"],
+            default_index=0,
+            styles={"nav-link-selected": {"background-color": "#00B4D8"}}
+        )
+        st.markdown("---")
+        with st.expander("⚙️ Electric Parameters", expanded=True):
+            volt = st.selectbox("Voltage (VL-L):", [480, 220, 110], index=0)
+            pf = st.number_input("Power Factor (PF):", 0.5, 1.0, 0.9, 0.01)
+            st.info(f"💵 kWh Price: ${COSTO_KWH} MXN (fixed)")
+        with st.expander("🎯 Filter Engine", expanded=True):
+            peak_sens = st.slider("Peak Sensitivity (%):", 80, 99, 95, 1)
 
-        with st.sidebar:
-            st.markdown("---")
-            selected_page = option_menu(
-                menu_title="Navigation",
-                options=["KPI Dashboard", "Behaviors", "Trends & Peaks", "Monthly Insights", "Executive PDF", "Cloud Sync"],
-                icons=["layers", "pie-chart", "activity", "calendar-month", "file-earmark-pdf", "cloud-arrow-up"],
-                default_index=0,
-                styles={"nav-link-selected": {"background-color": "#00B4D8"}}
-            )
-            st.markdown("---")
-            with st.expander("⚙️ Electric Parameters", expanded=True):
-                volt = st.selectbox("Voltage (VL-L):", [480, 220, 110], index=0)
-                pf = st.number_input("Power Factor (PF):", 0.5, 1.0, 0.9, 0.01)
-                st.info(f"💵 kWh Price: ${COSTO_KWH} MXN (fixed)")
-            with st.expander("🎯 Filter Engine", expanded=True):
-                min_d, max_d = get_filter_bounds(df_raw, t_col)
-                range_d = st.date_input("Time Range:", [min_d.date(), max_d.date()])
-                shifts = st.multiselect("Shifts:", [1, 2, 3], default=[1, 2, 3])
-                peak_sens = st.slider("Peak Sensitivity (%):", 80, 99, 95, 1)
-
-        df_proc = preprocess_electric_data(df_raw, t_col, a_col, volt, pf)
-        df_filt = df_proc[df_proc['Turno'].isin(shifts)].copy()
-        if len(range_d) == 2:
-            df_filt = df_filt[(df_filt['Día'] >= range_d[0]) & (df_filt['Día'] <= range_d[1])]
-
-        if df_filt.empty: 
-            st.warning("⚠️ No data found with selected filters.")
-        else:
-            e_total = calculate_energy_vectorized(df_filt, t_col, 'kW_Instant')
+    # Procesar archivo si está subido
+    if not uploaded_file:
+        st.markdown(f"""<div style="text-align: center; padding: 50px; background-color: #1a1e23; border-radius: 15px;">
+                <h1 style="color: #4a4e53; font-size: 60px;">📁</h1>
+                <h2 style="color: #e0e6ed;">Upload Data for {machine_name}</h2>
+                <p style="color: #9aa0a6;">Upload a HOBO CSV/XLSX file to begin analysis.</p>
+                </div>""", unsafe_allow_html=True)
+    else:
+        try:
+            file_bytes = uploaded_file.getvalue()
+            ext = uploaded_file.name.split('.')[-1].lower()
+            df_raw, t_col, a_col = load_hobo_data_from_bytes(file_bytes, ext)
             
-            if selected_page == "KPI Dashboard": 
-                render_kpi_dashboard(df_filt, t_col, a_col, e_total)
-            elif selected_page == "Trends & Peaks": 
-                render_tendencias_picos(df_filt, t_col, a_col, peak_sens)
-            elif selected_page == "Behaviors": 
-                render_analisis_turnos(df_filt, volt)
-            elif selected_page == "Monthly Insights": 
-                render_monthly_insights()
-            elif selected_page == "Executive PDF": 
-                st.markdown("<h2 align='center' style='color:#00FFAA;'>📄 Daily Executive PDF Report</h2>", unsafe_allow_html=True)
-                render_pdf_daily(df_filt, t_col, e_total)
-            elif selected_page == "Cloud Sync": 
-                render_cloud_sync(df_filt)
+            df_proc = preprocess_electric_data(df_raw, t_col, a_col, volt, pf)
             
-    except Exception as e:
-        st.error(f"⚠️ Error: {str(e)}")
+            # Filtros de fecha y turnos
+            min_d, max_d = get_filter_bounds(df_proc, t_col)
+            with st.sidebar:
+                with st.expander("🎯 Filter Engine", expanded=True):
+                    range_d = st.date_input("Time Range:", [min_d.date(), max_d.date()], key="date_range")
+                    shifts = st.multiselect("Shifts:", [1, 2, 3], default=[1, 2, 3], key="shifts")
+            
+            df_filt = df_proc[df_proc['Turno'].isin(shifts)].copy()
+            if len(range_d) == 2:
+                df_filt = df_filt[(df_filt['Día'] >= range_d[0]) & (df_filt['Día'] <= range_d[1])]
+            
+            if df_filt.empty: 
+                st.warning("⚠️ No data found with selected filters.")
+            else:
+                e_total = calculate_energy_vectorized(df_filt, t_col, 'kW_Instant')
+                
+                # Cargar datos históricos de la máquina para Monthly Insights
+                historical_data = load_machine_data(machine_id)
+                
+                if selected_page == "KPI Dashboard": 
+                    render_kpi_dashboard(df_filt, t_col, a_col, e_total, machine_name)
+                elif selected_page == "Trends & Peaks": 
+                    render_tendencias_picos(df_filt, t_col, a_col, peak_sens)
+                elif selected_page == "Behaviors": 
+                    render_analisis_turnos(df_filt, volt)
+                elif selected_page == "Monthly Insights": 
+                    render_monthly_insights(historical_data, machine_name)
+                elif selected_page == "Executive PDF": 
+                    st.markdown(f"<h2 align='center' style='color:#00FFAA;'>📄 Daily Executive PDF Report - {machine_name}</h2>", unsafe_allow_html=True)
+                    render_pdf_daily(df_filt, t_col, e_total, machine_name)
+                elif selected_page == "Cloud Sync": 
+                    render_cloud_sync(df_filt, machine_id, machine_name)
+                    
+        except Exception as e:
+            st.error(f"⚠️ Error: {str(e)}")
 
-st.markdown("<p style='text-align: right; color:#555; font-size:12px;'>Vector-Core Engine v5.6 | PDF Fixed | Rate: $2.40/kWh</p>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: right; color:#555; font-size:12px;'>Vector-Core Engine v6.0 | Multi-Machine | Rate: $2.40/kWh</p>", unsafe_allow_html=True)
