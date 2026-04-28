@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-⚡ Enterprise Energy Analyzer v6.1 - MULTI-MACHINE with Supabase
+⚡ Enterprise Energy Analyzer v8.2 - FULL DATA LOGGING, JSON FIXED, FLOATING BUTTON
 """
 
 import streamlit as st
@@ -9,15 +9,16 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from streamlit_option_menu import option_menu
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from PIL import Image
 import traceback
 import re
 import io
-import os
-import tempfile
+import json
 import matplotlib.pyplot as plt
 from io import BytesIO
+
+
 
 # Intentar importar Supabase
 try:
@@ -33,11 +34,9 @@ try:
 except ImportError:
     PDF_ENABLED = False
 
-# --- CONFIGURACIÓN Y ESTABILIDAD ---
-st.set_page_config(page_title="EA Energy Analyzer - Multi-Machine", layout="wide", page_icon="⚡")
-
-# Precio fijo kWh
-COSTO_KWH = 2.40  # Precio en MXN
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="EA Energy Analyzer", layout="wide", page_icon="⚡")
+COSTO_KWH = 2.40
 
 # CSS para eliminar temblor
 st.markdown("""
@@ -57,7 +56,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Configurar Supabase Client
+# --- SUPABASE ---
 @st.cache_resource
 def init_supabase():
     if SUPABASE_ENABLED and "supabase" in st.secrets:
@@ -73,9 +72,7 @@ def init_supabase():
 supabase_client = init_supabase()
 
 # --- FUNCIONES DE GESTIÓN DE MÁQUINAS ---
-
 def get_machines():
-    """Obtiene lista de todas las máquinas desde Supabase"""
     if not supabase_client:
         return pd.DataFrame()
     try:
@@ -86,7 +83,6 @@ def get_machines():
         return pd.DataFrame()
 
 def add_machine(machine_name, description=""):
-    """Agrega una nueva máquina"""
     if not supabase_client:
         return False
     try:
@@ -101,318 +97,92 @@ def add_machine(machine_name, description=""):
         return False
 
 def delete_machine(machine_id):
-    """Elimina una máquina y todos sus datos asociados"""
     if not supabase_client:
         return False
     try:
-        supabase_client.table('hobo_monthly_sync').delete().eq('machine_id', machine_id).execute()
+        supabase_client.table('machine_saved_data').delete().eq('machine_id', machine_id).execute()
         supabase_client.table('machines').delete().eq('id', machine_id).execute()
         return True
     except Exception as e:
         st.error(f"Error deleting machine: {e}")
         return False
 
-def save_machine_data(machine_id, daily_data):
-    """Guarda datos diarios de una máquina específica"""
+# # --- FUNCIÓN DE CONVERSIÓN A TIPOS NATIVOS (SOLUCIÓN DEFINITIVA) ---
+# def convert_to_serializable(obj):
+#     """Convierte recursivamente numpy/pandas a tipos nativos Python."""
+#     # Si es un array de NumPy, convertirlo a lista recursivamente
+#     if isinstance(obj, np.ndarray):
+#         return [convert_to_serializable(x) for x in obj.tolist()]
+#     # Escalares NumPy
+#     if isinstance(obj, (np.integer, np.int64, np.int32)):
+#         return int(obj)
+#     if isinstance(obj, (np.floating, np.float64, np.float32)):
+#         return float(obj)
+#     if isinstance(obj, np.bool_):
+#         return bool(obj)
+#     # Fechas
+#     if isinstance(obj, (pd.Timestamp, datetime, date)):
+#         return obj.isoformat()
+#     # Manejo de NaN/NaT (evita error con arrays)
+#     try:
+#         if pd.isna(obj):
+#             return None
+#     except Exception:
+#         pass
+#     # Listas y tuplas
+#     if isinstance(obj, (list, tuple)):
+#         return [convert_to_serializable(item) for item in obj]
+#     # Diccionarios
+#     if isinstance(obj, dict):
+#         return {k: convert_to_serializable(v) for k, v in obj.items()}
+#     # Cualquier otro tipo (string, int, float, etc.) se devuelve directamente
+#     return obj
+
+def save_full_machine_data(machine_id, df):
+    """Guarda DataFrame como CSV en Supabase. Sin errores de serialización."""
     if not supabase_client:
         return False
     try:
-        supabase_client.table('hobo_monthly_sync').delete().eq('machine_id', machine_id).execute()
-        records = []
-        for _, row in daily_data.iterrows():
-            records.append({
-                "machine_id": machine_id,
-                "Día": row['Día'].strftime('%Y-%m-%d') if isinstance(row['Día'], pd.Timestamp) else str(row['Día']),
-                "Potencia_Promedio_kW": float(row['Potencia_Promedio_kW']),
-                "Pico_Maximo_kW": float(row['Pico_Maximo_kW'])
-            })
-        if records:
-            supabase_client.table('hobo_monthly_sync').insert(records).execute()
+        # Convertir machine_id a int nativo de Python
+        machine_id = int(machine_id)
+        # Convertir DataFrame a CSV (string)
+        csv_data = df.to_csv(index=False)
+        # Crear payload con tipos nativos
+        payload = {
+            "machine_id": machine_id,
+            "data_json": csv_data,  # la columna se llama data_json pero contiene CSV
+            "updated_at": datetime.now().isoformat()
+        }
+        supabase_client.table('machine_saved_data').upsert(payload, on_conflict="machine_id").execute()
         return True
     except Exception as e:
-        st.error(f"Error saving machine data: {e}")
+        st.error(f"Error saving data: {str(e)}")
         return False
 
-def load_machine_data(machine_id):
-    """Carga los datos históricos de una máquina específica"""
-    if not supabase_client or not machine_id:
+def load_full_machine_data(machine_id):
+    """Carga DataFrame desde CSV almacenado."""
+    if not supabase_client:
         return pd.DataFrame()
     try:
-        response = supabase_client.table('hobo_monthly_sync').select("*").eq('machine_id', machine_id).order("Día", desc=False).execute()
-        if response.data:
-            df = pd.DataFrame(response.data)
-            df['Día'] = pd.to_datetime(df['Día'])
+        machine_id = int(machine_id)
+        response = supabase_client.table('machine_saved_data').select("data_json").eq('machine_id', machine_id).execute()
+        if response.data and len(response.data) > 0:
+            csv_data = response.data[0]['data_json']
+            from io import StringIO
+            df = pd.read_csv(StringIO(csv_data))
+            # Reconvertir columnas de fecha/hora
+            for col in ['DateTime', 'Día']:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
             return df
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"Error loading machine data: {e}")
+        st.error(f"Error loading data: {e}")
         return pd.DataFrame()
 
-# --- FUNCIONES NÚCLEO PDF ---
-if PDF_ENABLED:
-    class ExecutivePDF(FPDF):
-        def header(self):
-            self.set_font('Helvetica', 'B', 16)
-            self.set_text_color(0, 180, 216)
-            self.cell(0, 12, 'Executive Energy Analysis Report', border=0, align='C')
-            self.ln(8)
-            self.line(10, 25, 200, 25)
-            self.ln(10)
 
-        def footer(self):
-            self.set_y(-15)
-            self.set_font('Helvetica', 'I', 8)
-            self.set_text_color(128, 128, 128)
-            self.cell(0, 8, f'Page {self.page_no()} - Vector-Core Engine v6.1 | EA Enterprise Energy Analyzer', 0, 0, 'C')
 
-def create_bar_chart_png(data_dict, title, xlabel='Category', ylabel='Power (kW)'):
-    """Crea gráfico de barras y retorna como bytes"""
-    fig, ax = plt.subplots(figsize=(8, 4))
-    labels = list(data_dict.keys())
-    values = list(data_dict.values())
-    colors = ['#00B4D8', '#FF6B6B', '#4ECDC4', '#FFB347', '#9B59B6']
-    bars = ax.bar(labels, values, color=colors[:len(labels)])
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
-    ax.set_ylabel(ylabel, fontsize=11)
-    ax.set_xlabel(xlabel, fontsize=11)
-    for bar, val in zip(bars, values):
-        if val > 0:
-            ax.annotate(f'{val:.1f}',
-                       xy=(bar.get_x() + bar.get_width() / 2, val),
-                       xytext=(0, 3),
-                       textcoords="offset points",
-                       ha='center', va='bottom', fontsize=9, fontweight='bold')
-    ax.grid(True, linestyle='--', alpha=0.3)
-    fig.patch.set_facecolor('white')
-    ax.set_facecolor('#F8F9FA')
-    plt.tight_layout()
-    buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
-
-def create_line_chart_png(data_dict, title, xlabel='Date', ylabel='Power (kW)'):
-    """Crea gráfico de líneas y retorna como bytes"""
-    fig, ax = plt.subplots(figsize=(8, 4))
-    labels = list(data_dict.keys())
-    values = list(data_dict.values())
-    x_pos = range(len(labels))
-    ax.plot(x_pos, values, color='#00B4D8', marker='o', markersize=6, linewidth=2)
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
-    ax.set_ylabel(ylabel, fontsize=11)
-    ax.set_xlabel(xlabel, fontsize=11)
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
-    if values:
-        threshold = np.mean(values) * 1.2
-        for i, val in enumerate(values):
-            if val > threshold:
-                ax.scatter(i, val, color='red', s=100, edgecolors='white', zorder=5)
-                ax.annotate(f'{val:.1f}',
-                           xy=(i, val),
-                           xytext=(0, 10),
-                           textcoords="offset points",
-                           ha='center', va='bottom', color='red', fontsize=9, fontweight='bold')
-    ax.grid(True, linestyle='--', alpha=0.3)
-    fig.patch.set_facecolor('white')
-    ax.set_facecolor('#F8F9FA')
-    plt.tight_layout()
-    buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
-
-# --- NUEVAS FUNCIONES GRÁFICAS TÉCNICAS ---
-
-def create_pie_chart_png(data_dict, title):
-    """Crea gráfico de torta con porcentajes y retorna como bytes"""
-    fig, ax = plt.subplots(figsize=(6, 5))
-    labels = list(data_dict.keys())
-    values = list(data_dict.values())
-    colors = ['#00B4D8', '#FF6B6B', '#4ECDC4', '#FFB347', '#9B59B6']
-    wedges, texts, autotexts = ax.pie(
-        values, labels=labels, autopct='%1.1f%%',
-        colors=colors[:len(labels)], startangle=90,
-        wedgeprops=dict(edgecolor='white', linewidth=2)
-    )
-    for at in autotexts:
-        at.set_fontsize(10)
-        at.set_fontweight('bold')
-    ax.set_title(title, fontsize=13, fontweight='bold', pad=12)
-    fig.patch.set_facecolor('white')
-    plt.tight_layout()
-    buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
-
-def create_technical_series_png(df, time_col, title):
-    """Serie de tiempo técnica con banda de variabilidad +-1sigma, media y umbral P95"""
-    fig, ax = plt.subplots(figsize=(8, 4))
-    values = df['kW_Instant'].values
-    avg = values.mean()
-    std = values.std()
-    threshold_95 = np.percentile(values, 95)
-    n = max(1, len(df) // 600)
-    df_plot = df.iloc[::n]
-    x_idx = list(range(len(df_plot)))
-    ax.plot(x_idx, df_plot['kW_Instant'].values, color='#00B4D8', linewidth=1.2, alpha=0.85, label='Power (kW)')
-    ax.axhline(avg, color='#2ECC71', linestyle='--', linewidth=1.8, label=f'Mean: {avg:.2f} kW')
-    ax.axhline(avg + std, color='#F39C12', linestyle=':', linewidth=1.2, label=f'+1s: {avg+std:.2f} kW')
-    ax.axhline(threshold_95, color='#E74C3C', linestyle='--', linewidth=1.8, label=f'P95: {threshold_95:.2f} kW')
-    ax.fill_between(x_idx, avg - std, avg + std, alpha=0.12, color='#2ECC71')
-    ax.set_title(title, fontsize=13, fontweight='bold', pad=12)
-    ax.set_ylabel('Power (kW)', fontsize=10)
-    ax.set_xlabel('Time (sampled points)', fontsize=10)
-    ax.legend(fontsize=8, loc='upper right', framealpha=0.9)
-    ax.grid(True, linestyle='--', alpha=0.3)
-    fig.patch.set_facecolor('white')
-    ax.set_facecolor('#F8F9FA')
-    plt.tight_layout()
-    buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
-
-def create_hourly_avg_png(df, title):
-    """Potencia promedio por hora 0-23 con codigo de colores por nivel"""
-    fig, ax = plt.subplots(figsize=(8, 4))
-    hourly = df.groupby('Hora')['kW_Instant'].mean()
-    hourly_all = pd.Series(0.0, index=range(24))
-    for h in hourly.index:
-        hourly_all[h] = hourly[h]
-    mean_val = hourly_all[hourly_all > 0].mean() if (hourly_all > 0).any() else 0
-    colors = []
-    for v in hourly_all.values:
-        if v > mean_val * 1.15:
-            colors.append('#E74C3C')
-        elif v > mean_val * 0.85:
-            colors.append('#F39C12')
-        else:
-            colors.append('#00B4D8')
-    bars = ax.bar(hourly_all.index, hourly_all.values, color=colors, edgecolor='white', linewidth=0.8)
-    ax.axhline(mean_val, color='#2ECC71', linestyle='--', linewidth=2)
-    for bar, val in zip(bars, hourly_all.values):
-        if val > 0:
-            ax.annotate(f'{val:.1f}', xy=(bar.get_x() + bar.get_width() / 2, val),
-                       xytext=(0, 3), textcoords='offset points',
-                       ha='center', va='bottom', fontsize=7, fontweight='bold')
-    ax.set_title(title, fontsize=13, fontweight='bold', pad=12)
-    ax.set_ylabel('Avg Power (kW)', fontsize=10)
-    ax.set_xlabel('Hour of Day', fontsize=10)
-    ax.set_xticks(range(24))
-    ax.grid(True, linestyle='--', alpha=0.3)
-    from matplotlib.patches import Patch
-    legend_els = [Patch(facecolor='#E74C3C', label='High (>115% avg)'),
-                  Patch(facecolor='#F39C12', label='Normal (85-115%)'),
-                  Patch(facecolor='#00B4D8', label='Low (<85% avg)'),
-                  Patch(facecolor='#2ECC71', label='Daily mean')]
-    ax.legend(handles=legend_els, fontsize=8, loc='upper right')
-    fig.patch.set_facecolor('white')
-    ax.set_facecolor('#F8F9FA')
-    plt.tight_layout()
-    buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
-
-def create_peaks_scatter_png(df, time_col, peaks_df, threshold, title):
-    """Grafico de picos con labels de valor kW y timestamp en cada evento"""
-    fig, ax = plt.subplots(figsize=(8, 4))
-    n = max(1, len(df) // 500)
-    df_plot = df.iloc[::n]
-    ax.plot(range(len(df_plot)), df_plot['kW_Instant'].values,
-            color='#00B4D8', linewidth=1, alpha=0.7, label='Power (kW)')
-    ax.axhline(threshold, color='orange', linestyle='--', linewidth=1.5,
-               label=f'Threshold: {threshold:.2f} kW')
-    if not peaks_df.empty:
-        top_peaks = peaks_df.nlargest(min(15, len(peaks_df)), 'kW_Instant')
-        for _, row in top_peaks.iterrows():
-            try:
-                ts = row[time_col]
-                closest_idx = (df[time_col] - ts).abs().idxmin()
-                x_pos = closest_idx // n
-                ax.scatter(x_pos, row['kW_Instant'], color='red', s=80, zorder=5, edgecolors='white')
-                ax.annotate(
-                    f"{row['kW_Instant']:.1f}kW\n{ts.strftime('%m/%d %H:%M')}",
-                    xy=(x_pos, row['kW_Instant']),
-                    xytext=(8, 5), textcoords='offset points',
-                    fontsize=6.5, color='#C0392B', fontweight='bold',
-                    arrowprops=dict(arrowstyle='->', color='#C0392B', lw=0.8)
-                )
-            except Exception:
-                pass
-    ax.set_title(title, fontsize=13, fontweight='bold', pad=12)
-    ax.set_ylabel('Power (kW)', fontsize=10)
-    ax.set_xlabel('Time (sampled)', fontsize=10)
-    ax.legend(fontsize=9)
-    ax.grid(True, linestyle='--', alpha=0.3)
-    fig.patch.set_facecolor('white')
-    ax.set_facecolor('#F8F9FA')
-    plt.tight_layout()
-    buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
-
-def calculate_technical_kpis(df, time_col, energia_total):
-    """Calcula KPIs tecnicos de ingenieria electrica"""
-    avg_kw = df['kW_Instant'].mean()
-    max_kw = df['kW_Instant'].max()
-    min_kw = df['kW_Instant'].min()
-    std_kw = df['kW_Instant'].std()
-    horas  = (df[time_col].max() - df[time_col].min()).total_seconds() / 3600.0
-
-    demand_factor    = avg_kw / max_kw if max_kw > 0 else 0.0
-    load_factor      = energia_total / (max_kw * horas) if (max_kw * horas) > 0 else 0.0
-    par              = max_kw / avg_kw if avg_kw > 0 else 0.0
-    cov              = (std_kw / avg_kw * 100.0) if avg_kw > 0 else 0.0
-    energy_intensity = energia_total / horas if horas > 0 else 0.0
-
-    if load_factor >= 0.80:
-        efficiency_class = "EXCELLENT  (>80%)"
-    elif load_factor >= 0.60:
-        efficiency_class = "GOOD       (60-80%)"
-    elif load_factor >= 0.40:
-        efficiency_class = "FAIR       (40-60%)"
-    else:
-        efficiency_class = "POOR       (<40%)"
-
-    if cov < 15:
-        stability = "STABLE     (CoV <15%)"
-    elif cov < 30:
-        stability = "MODERATE   (CoV 15-30%)"
-    else:
-        stability = "UNSTABLE   (CoV >30%)"
-
-    recommendations = []
-    if load_factor < 0.50:
-        recommendations.append("Low load factor: consider consolidating shifts or rescheduling heavy loads to fill gaps.")
-    if cov > 30:
-        recommendations.append("High variability: investigate irregular demand spikes and process inconsistencies.")
-    if par > 2.5:
-        recommendations.append("High PAR: peak shaving strategies (capacitor banks, demand limiters) recommended.")
-    if demand_factor < 0.50:
-        recommendations.append("Low demand factor: installed capacity may be oversized relative to actual usage.")
-    if not recommendations:
-        recommendations.append("Operating within efficient parameters. Continue periodic monitoring.")
-
-    return {
-        'avg_kw': avg_kw, 'max_kw': max_kw, 'min_kw': min_kw, 'std_kw': std_kw,
-        'horas': horas, 'demand_factor': demand_factor, 'load_factor': load_factor,
-        'par': par, 'cov': cov, 'energy_intensity': energy_intensity,
-        'efficiency_class': efficiency_class, 'stability': stability,
-        'energia_total': energia_total, 'recommendations': recommendations
-    }
-
-# --- FUNCIONES DE CARGA Y PROCESAMIENTO ---
-
+# --- FUNCIONES DE CARGA Y PROCESAMIENTO DE HOBO ---
 @st.cache_data(show_spinner="Analizando archivo HOBO...")
 def load_hobo_data_from_bytes(file_content, extension):
     try:
@@ -424,14 +194,18 @@ def load_hobo_data_from_bytes(file_content, extension):
                 if re.search(r'\d+/\d+/\d+', line) or re.search(r'\d+-\d+-\d+', line):
                     data_start = i
                     break
-            if data_start == 0: data_start = 3
+            if data_start == 0:
+                data_start = 3
             parsed_data = []
             for line in lines[data_start:]:
-                if not line.strip(): continue
+                if not line.strip():
+                    continue
                 clean_line = line.replace('"', '').strip()
                 parts = clean_line.split('\t')
-                if len(parts) < 2: parts = clean_line.split(',')
-                if len(parts) >= 2: parsed_data.append(parts[:3])
+                if len(parts) < 2:
+                    parts = clean_line.split(',')
+                if len(parts) >= 2:
+                    parsed_data.append(parts[:3])
             if parsed_data:
                 df = pd.DataFrame(parsed_data)
                 df.columns = ['Index', 'DateTime', 'Amperios']
@@ -444,16 +218,16 @@ def load_hobo_data_from_bytes(file_content, extension):
             df = pd.read_excel(io.BytesIO(file_content), skiprows=2)
             df.columns = [str(col).strip() for col in df.columns]
             time_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
-            amp_col  = df.columns[2] if len(df.columns) > 2 else df.columns[1]
+            amp_col = df.columns[2] if len(df.columns) > 2 else df.columns[1]
             df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
-            df[amp_col]  = pd.to_numeric(df[amp_col], errors='coerce')
+            df[amp_col] = pd.to_numeric(df[amp_col], errors='coerce')
             df = df.dropna(subset=[time_col]).reset_index(drop=True)
             df.rename(columns={time_col: 'DateTime', amp_col: 'Amperios'}, inplace=True)
             return df, 'DateTime', 'Amperios'
     except Exception as e:
         raise RuntimeError(f"Error procesando archivo: {str(e)}")
 
-@st.cache_data(show_spinner="Calculando metricas...")
+@st.cache_data(show_spinner="Calculando métricas...")
 def preprocess_electric_data(df, time_col, amp_col, voltage_type, pf):
     df = df.copy()
     df['kW_Instant'] = (voltage_type * df[amp_col] * pf * 1.732) / 1000.0
@@ -466,7 +240,8 @@ def preprocess_electric_data(df, time_col, amp_col, voltage_type, pf):
     return df
 
 def calculate_energy_vectorized(df, time_col, power_col):
-    if df.empty or len(df) < 2: return 0.0
+    if df.empty or len(df) < 2:
+        return 0.0
     time_diff_hours = df[time_col].diff().dt.total_seconds() / 3600.0
     avg_power = (df[power_col] + df[power_col].shift(1)) / 2.0
     valid_intervals = (time_diff_hours > 0) & (time_diff_hours <= 1.0)
@@ -474,7 +249,8 @@ def calculate_energy_vectorized(df, time_col, power_col):
     return float(energy)
 
 def detect_peaks_vectorized(df, column, percentile=95):
-    if df.empty: return pd.DataFrame(), 0.0
+    if df.empty:
+        return pd.DataFrame(), 0.0
     threshold = df[column].quantile(percentile / 100.0)
     peaks = df[df[column] > threshold].copy()
     if not peaks.empty:
@@ -498,24 +274,27 @@ def sanitize_pdf(text: str) -> str:
     return text
 
 # --- RENDERIZADOS DE SECCIONES ---
-
 def render_kpi_dashboard(df_filtered, time_col, amp_col, energia_total, machine_name):
     st.markdown(f"<h2 align='center' style='color:#00B4D8;'>📊 {machine_name} - Dashboard & KPIs</h2>", unsafe_allow_html=True)
     st.write("Executive snapshot of the electrical footprint for the selected period.")
     col1, col2, col3, col4, col5 = st.columns(5)
-    with col1: st.metric("📈 Active Records", f"{len(df_filtered):,}")
-    with col2: st.metric("⚡ Avg Power", f"{df_filtered['kW_Instant'].mean():.2f} kW")
-    with col3: st.metric("💡 Total Energy", f"{energia_total:.2f} kWh")
+    with col1:
+        st.metric("📈 Active Records", f"{len(df_filtered):,}")
+    with col2:
+        st.metric("⚡ Avg Power", f"{df_filtered['kW_Instant'].mean():.2f} kW")
+    with col3:
+        st.metric("💡 Total Energy", f"{energia_total:.2f} kWh")
     with col4:
         horas = (df_filtered[time_col].max() - df_filtered[time_col].min()).total_seconds() / 3600
         st.metric("⏱️ Monitoring Duration", f"{horas:.1f} hrs")
-    with col5: st.metric("🔴 Max Peak", f"{df_filtered['kW_Instant'].max():.2f} kW")
+    with col5:
+        st.metric("🔴 Max Peak", f"{df_filtered['kW_Instant'].max():.2f} kW")
     st.markdown("---")
     worst_shift = df_filtered.groupby('Turno')['kW_Instant'].mean().idxmax()
-    best_shift  = df_filtered.groupby('Turno')['kW_Instant'].mean().idxmin()
+    best_shift = df_filtered.groupby('Turno')['kW_Instant'].mean().idxmin()
     costo_total = energia_total * COSTO_KWH
     variability = df_filtered['kW_Instant'].std() / df_filtered['kW_Instant'].mean()
-    peak_hours  = df_filtered.groupby('Hora')['kW_Instant'].max().nlargest(3)
+    peak_hours = df_filtered.groupby('Hora')['kW_Instant'].max().nlargest(3)
     col_a, col_b, col_c = st.columns(3)
     with col_a:
         st.info(f"**🎯 Instant Diagnostics**\n- **Most Critical Shift:** Shift {worst_shift}\n- **Most Efficient Shift:** Shift {best_shift}")
@@ -527,24 +306,27 @@ def render_kpi_dashboard(df_filtered, time_col, amp_col, energia_total, machine_
         st.markdown(f"**⏰ Peak Demand Hours:**\n{peak_list}")
 
 @st.fragment
-def render_tendencias_picos(df_filtered, time_col, amp_col, peak_percentile):
+def render_tendencias_picos(df_filtered, time_col, amp_col, peak_percentile, kw_min=None, kw_max=None):
     st.markdown("<h2 align='center' style='color:#FF6B6B;'>📈 Time Trend & Peak Analysis</h2>", unsafe_allow_html=True)
-    peaks, threshold = detect_peaks_vectorized(df_filtered, 'kW_Instant', peak_percentile)
+    df_display = df_filtered.copy()
+    if kw_min is not None and kw_max is not None:
+        df_display = df_display[(df_display['kW_Instant'] >= kw_min) & (df_display['kW_Instant'] <= kw_max)]
+        st.caption(f"🔍 Showing power values between {kw_min:.1f} kW and {kw_max:.1f} kW")
+    peaks, threshold = detect_peaks_vectorized(df_display, 'kW_Instant', peak_percentile)
     if not peaks.empty:
         st.error(f"⚠️ **DEMAND ALERT**: {len(peaks)} events exceeded threshold ({threshold:.2f} kW).")
-
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=df_filtered[time_col],
-        y=df_filtered['kW_Instant'],
+        x=df_display[time_col],
+        y=df_display['kW_Instant'],
         name='Power (kW)',
         line=dict(color='#00B4D8', width=2),
         hovertemplate='<b>📅 Time</b>: %{x|%Y-%m-%d %H:%M}<br><b>⚡ Power</b>: %{y:.2f} kW<br><b>👥 Shift</b>: %{text}<extra></extra>',
-        text=df_filtered['Turno']
+        text=df_display['Turno']
     ))
     fig.add_trace(go.Scatter(
-        x=df_filtered[time_col],
-        y=[threshold] * len(df_filtered),
+        x=df_display[time_col],
+        y=[threshold] * len(df_display),
         name=f'Threshold ({peak_percentile}%)',
         line=dict(color='orange', dash='dot', width=2)
     ))
@@ -554,22 +336,13 @@ def render_tendencias_picos(df_filtered, time_col, amp_col, peak_percentile):
             y=peaks['kW_Instant'],
             mode='markers+text',
             name='⚠️ Peak Event',
-            text=[f"{v:.1f} kW" for v in peaks['kW_Instant']],
+            text=peaks['kW_Instant'].round(1).astype(str) + ' kW',
             textposition='top center',
-            textfont=dict(size=10, color='#FF4444'),
-            marker=dict(color='red', size=12, symbol='circle', line=dict(color='white', width=2)),
-            hovertemplate='<b>Peak</b>: %{y:.2f} kW<br><b>Time</b>: %{x|%Y-%m-%d %H:%M}<extra></extra>'
+            textfont=dict(color='red', size=10, family='Arial Black'),
+            marker=dict(color='red', size=12, symbol='circle', line=dict(color='white', width=2))
         ))
     fig.update_layout(template="plotly_dark", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
-
-    if not peaks.empty:
-        st.markdown("#### 🔴 Top 10 Peak Events")
-        top10 = peaks.nlargest(10, 'kW_Instant')[[time_col, 'kW_Instant', 'Turno', 'peak_magnitude']].copy()
-        top10.columns = ['Timestamp', 'Power (kW)', 'Shift', 'Over Threshold (kW)']
-        top10['Power (kW)'] = top10['Power (kW)'].round(3)
-        top10['Over Threshold (kW)'] = top10['Over Threshold (kW)'].round(3)
-        st.dataframe(top10, use_container_width=True, hide_index=True)
 
 @st.fragment
 def render_analisis_turnos(df_filtered, voltage_type):
@@ -587,7 +360,6 @@ def render_analisis_turnos(df_filtered, voltage_type):
         fig = px.pie(turno_sum, values='kW_Instant', names='Turno', hole=.5, title="Energy Share (%)")
         fig.update_layout(template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
-
     st.markdown("### 📈 Hourly Consumption Trend by Shift")
     df_hourly = df_filtered.groupby(['Hora', 'Turno'])['kW_Instant'].mean().reset_index()
     df_hourly['Turno'] = df_hourly['Turno'].astype(str)
@@ -595,525 +367,191 @@ def render_analisis_turnos(df_filtered, voltage_type):
     fig_hourly.update_layout(template="plotly_dark")
     st.plotly_chart(fig_hourly, use_container_width=True)
 
-# --- PDF TECNICO DIARIO ---
+# --- FUNCIONES PARA GRÁFICOS PNG (PDF) ---
+def create_bar_chart_png(data_dict, title, xlabel='Category', ylabel='Power (kW)'):
+    fig, ax = plt.subplots(figsize=(8, 4))
+    labels = list(data_dict.keys())
+    values = list(data_dict.values())
+    colors = ['#00B4D8', '#FF6B6B', '#4ECDC4', '#FFB347', '#9B59B6']
+    bars = ax.bar(labels, values, color=colors[:len(labels)])
+    ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
+    ax.set_ylabel(ylabel, fontsize=11)
+    ax.set_xlabel(xlabel, fontsize=11)
+    for bar, val in zip(bars, values):
+        if val > 0:
+            ax.annotate(f'{val:.1f}', xy=(bar.get_x() + bar.get_width()/2, val),
+                        xytext=(0, 3), textcoords="offset points",
+                        ha='center', va='bottom', fontsize=9, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.3)
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('#F8F9FA')
+    plt.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+def create_line_chart_with_peaks_png(df, time_col, power_col, peaks_df, title, xlabel='Date', ylabel='Power (kW)'):
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(df[time_col], df[power_col], color='#00B4D8', linewidth=1.5, alpha=0.7)
+    if not peaks_df.empty:
+        ax.scatter(peaks_df[time_col], peaks_df[power_col], color='red', s=80,
+                   edgecolors='white', zorder=5, label='Peaks')
+        for _, row in peaks_df.iterrows():
+            ax.annotate(f'{row[power_col]:.1f}', xy=(row[time_col], row[power_col]),
+                        xytext=(0, 10), textcoords="offset points",
+                        ha='center', fontsize=8, color='red', fontweight='bold')
+    ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
+    ax.set_ylabel(ylabel, fontsize=11)
+    ax.set_xlabel(xlabel, fontsize=11)
+    ax.grid(True, linestyle='--', alpha=0.3)
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('#F8F9FA')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+if PDF_ENABLED:
+    class ExecutivePDF(FPDF):
+        def header(self):
+            self.set_font('Helvetica', 'B', 16)
+            self.set_text_color(0, 180, 216)
+            self.cell(0, 12, 'Executive Energy Analysis Report', border=0, align='C')
+            self.ln(8)
+            self.line(10, 25, 200, 25)
+            self.ln(10)
+        def footer(self):
+            self.set_y(-15)
+            self.set_font('Helvetica', 'I', 8)
+            self.set_text_color(128, 128, 128)
+            self.cell(0, 8, f'Page {self.page_no()} - Powered by Vector-Core Engine', 0, 0, 'C')
 
 def render_pdf_daily(df_filt, t_col, energia_total, machine_name):
-    """PDF Diario Tecnico: KPIs de ingenieria, 6 graficas, tabla de picos, recomendaciones"""
-    if not PDF_ENABLED:
-        st.warning("PDF generation requires fpdf and matplotlib")
-        return
-    if st.button("📑 Generate Technical Daily Report", use_container_width=True, key="pdf_daily_btn"):
-        with st.spinner("Generating technical report..."):
+    if st.button("📑 Generate Daily Report", use_container_width=True, key="pdf_daily_btn"):
+        with st.spinner("Generating daily report..."):
             try:
-                kpis         = calculate_technical_kpis(df_filt, t_col, energia_total)
-                fecha_inicio = df_filt[t_col].min().strftime('%B %d, %Y')
-                fecha_fin    = df_filt[t_col].max().strftime('%B %d, %Y')
-                costo_total  = energia_total * COSTO_KWH
-
-                series_img = create_technical_series_png(df_filt, t_col,
-                    'Power Time Series with Mean, +-1sigma and P95')
-
-                peaks, threshold = detect_peaks_vectorized(df_filt, 'kW_Instant', 95)
-                peaks_img  = create_peaks_scatter_png(df_filt, t_col, peaks, threshold,
-                    'Peak Demand Events (P95 threshold) - Labeled')
-
-                hourly_img = create_hourly_avg_png(df_filt,
-                    'Average Power by Hour of Day (color-coded by level)')
-
-                shift_data     = df_filt.groupby('Turno')['kW_Instant'].mean().to_dict()
-                shift_data_fmt = {f"Shift {k}": v for k, v in shift_data.items()}
-                bar_img        = create_bar_chart_png(shift_data_fmt,
-                    'Average Power per Shift', 'Shift', 'Power (kW)')
-
-                shift_energy   = df_filt.groupby('Turno')['kW_Instant'].sum().to_dict()
-                shift_e_fmt    = {f"Shift {k}": v for k, v in shift_energy.items()}
-                pie_img        = create_pie_chart_png(shift_e_fmt, 'Energy Share by Shift (%)')
-
-                daily_data = df_filt.groupby('Dia')['kW_Instant'].mean().to_dict() if 'Dia' in df_filt.columns else df_filt.groupby('Día')['kW_Instant'].mean().to_dict()
-                daily_fmt  = {str(k)[-5:]: v for k, v in list(daily_data.items())[-14:]}
-                trend_img  = create_line_chart_png(daily_fmt,
-                    'Daily Average Power Trend', 'Date', 'Power (kW)')
-
-                pdf = ExecutivePDF()
-
-                # PAGINA 1: KPIs tecnicos
-                pdf.add_page()
-                pdf.set_font('Helvetica', 'B', 14)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 10, f"Technical Daily Report - {machine_name}", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_font('Helvetica', '', 10)
-                pdf.set_text_color(60, 60, 60)
-                pdf.multi_cell(0, 6, sanitize_pdf(
-                    f"Machine: {machine_name}  |  Period: {fecha_inicio} to {fecha_fin}  |  "
-                    f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                ))
-                pdf.ln(5)
-
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "1. Electrical Engineering KPIs", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_text_color(30, 30, 30)
-
-                kpi_rows = [
-                    ("Monitoring Period",            f"{kpis['horas']:.2f} hours"),
-                    ("Total Records Analyzed",       f"{len(df_filt):,}"),
-                    ("Total Energy Consumed",        f"{energia_total:,.4f} kWh"),
-                    ("Average Power",                f"{kpis['avg_kw']:.4f} kW"),
-                    ("Maximum Peak Power",           f"{kpis['max_kw']:.4f} kW"),
-                    ("Minimum Power Recorded",       f"{kpis['min_kw']:.4f} kW"),
-                    ("Standard Deviation (sigma)",   f"{kpis['std_kw']:.4f} kW"),
-                    ("Demand Factor  (Avg/Peak)",    f"{kpis['demand_factor']:.4f}   ({kpis['demand_factor']*100:.2f}%)"),
-                    ("Load Factor    (E / E_max)",   f"{kpis['load_factor']:.4f}   ({kpis['load_factor']*100:.2f}%)"),
-                    ("Peak-to-Avg Ratio (PAR)",      f"{kpis['par']:.4f}"),
-                    ("Coeff. of Variation (CoV)",    f"{kpis['cov']:.2f}%"),
-                    ("Energy Intensity",             f"{kpis['energy_intensity']:.4f} kW/h"),
-                    ("Efficiency Classification",   sanitize_pdf(kpis['efficiency_class'])),
-                    ("Demand Stability",             sanitize_pdf(kpis['stability'])),
-                    ("Estimated Energy Cost",        f"${costo_total:,.2f} MXN  (@  ${COSTO_KWH} MXN/kWh)"),
-                    ("Peak Events (P95)",            f"{len(peaks)} events above {threshold:.3f} kW"),
-                ]
-                for i, (label, value) in enumerate(kpi_rows):
-                    pdf.set_font('Helvetica', 'B', 9)
-                    fill = i % 2 == 0
-                    pdf.set_fill_color(235, 248, 252) if fill else pdf.set_fill_color(255, 255, 255)
-                    pdf.cell(80, 7, sanitize_pdf(label), border=1, fill=fill)
-                    pdf.set_font('Helvetica', '', 9)
-                    pdf.cell(0, 7, sanitize_pdf(value), border=1, fill=fill, new_x="LMARGIN", new_y="NEXT")
-                pdf.ln(5)
-
-                # Shift efficiency table
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "2. Shift Efficiency Analysis", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_text_color(30, 30, 30)
-                pdf.set_font('Helvetica', 'B', 9)
-                pdf.set_fill_color(0, 180, 216)
-                pdf.set_text_color(255, 255, 255)
-                hdrs = ["Shift", "Avg kW", "Max kW", "Min kW", "Std kW", "CoV%", "% Energy"]
-                ws   = [28, 27, 27, 27, 27, 22, 32]
-                for hdr, w in zip(hdrs, ws):
-                    pdf.cell(w, 7, hdr, border=1, fill=True, align='C')
-                pdf.ln()
-                pdf.set_text_color(30, 30, 30)
-                total_e = df_filt['kW_Instant'].sum()
-                for idx, shift_num in enumerate(sorted(df_filt['Turno'].unique())):
-                    sub = df_filt[df_filt['Turno'] == shift_num]
-                    pct = sub['kW_Instant'].sum() / total_e * 100 if total_e > 0 else 0
-                    cov_s = sub['kW_Instant'].std() / sub['kW_Instant'].mean() * 100 if sub['kW_Instant'].mean() > 0 else 0
-                    row_vals = [
-                        f"Shift {shift_num}",
-                        f"{sub['kW_Instant'].mean():.3f}",
-                        f"{sub['kW_Instant'].max():.3f}",
-                        f"{sub['kW_Instant'].min():.3f}",
-                        f"{sub['kW_Instant'].std():.3f}",
-                        f"{cov_s:.1f}%",
-                        f"{pct:.1f}%"
-                    ]
-                    pdf.set_font('Helvetica', '', 9)
-                    fill = idx % 2 == 0
-                    pdf.set_fill_color(245, 250, 255) if fill else pdf.set_fill_color(255, 255, 255)
-                    for v, w in zip(row_vals, ws):
-                        pdf.cell(w, 7, v, border=1, fill=fill, align='C')
-                    pdf.ln()
-                pdf.ln(5)
-
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "3. Technical Recommendations", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_text_color(30, 30, 30)
-                pdf.set_font('Helvetica', '', 10)
-                for rec in kpis['recommendations']:
-                    pdf.cell(6, 6, '*')
-                    pdf.multi_cell(0, 6, sanitize_pdf(rec))
-                    pdf.ln(1)
-
-                # PAGINA 2: Serie de tiempo
-                pdf.add_page()
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "4. Power Time Series - Statistical Bands", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_font('Helvetica', '', 8)
-                pdf.set_text_color(80, 80, 80)
-                pdf.multi_cell(0, 5, sanitize_pdf(
-                    f"Blue: instantaneous power  |  Green dashed: mean ({kpis['avg_kw']:.2f} kW)  |  "
-                    f"Orange dotted: +1 sigma  |  Red dashed: P95 ({np.percentile(df_filt['kW_Instant'], 95):.2f} kW)"
-                ))
-                pdf.ln(2)
-                pdf.image(series_img, x=10, w=190)
-
-                # PAGINA 3: Picos con labels
-                pdf.add_page()
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "5. Peak Demand Events - Labeled (P95)", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_font('Helvetica', '', 8)
-                pdf.set_text_color(80, 80, 80)
-                pdf.multi_cell(0, 5, sanitize_pdf(
-                    f"Threshold (P95): {threshold:.3f} kW  |  "
-                    f"Total events: {len(peaks)}  |  "
-                    f"Max recorded: {kpis['max_kw']:.3f} kW  |  "
-                    f"PAR: {kpis['par']:.3f}"
-                ))
-                pdf.ln(2)
-                pdf.image(peaks_img, x=10, w=190)
-
-                if not peaks.empty:
-                    pdf.ln(3)
-                    pdf.set_font('Helvetica', 'B', 10)
-                    pdf.set_text_color(0, 180, 216)
-                    pdf.cell(0, 7, "Top 15 Peak Events - Detail Table", new_x="LMARGIN", new_y="NEXT")
-                    pdf.set_font('Helvetica', 'B', 8)
-                    pdf.set_fill_color(0, 180, 216)
-                    pdf.set_text_color(255, 255, 255)
-                    p_hdrs = ["Timestamp", "Power (kW)", "Shift", "Over Threshold (kW)", "Hour"]
-                    p_ws   = [58, 35, 22, 50, 25]
-                    for hdr, w in zip(p_hdrs, p_ws):
-                        pdf.cell(w, 7, hdr, border=1, fill=True, align='C')
-                    pdf.ln()
-                    top15 = peaks.nlargest(15, 'kW_Instant')
-                    pdf.set_text_color(30, 30, 30)
-                    for i, (_, row) in enumerate(top15.iterrows()):
-                        pdf.set_font('Helvetica', '', 8)
-                        fill = i % 2 == 0
-                        pdf.set_fill_color(250, 245, 245) if fill else pdf.set_fill_color(255, 255, 255)
-                        mag = row.get('peak_magnitude', row['kW_Instant'] - threshold)
-                        row_data = [
-                            row[t_col].strftime('%Y-%m-%d %H:%M:%S'),
-                            f"{row['kW_Instant']:.4f}",
-                            f"Shift {int(row['Turno'])}",
-                            f"+{mag:.4f}",
-                            f"{int(row['Hora'])}:00"
-                        ]
-                        for v, w in zip(row_data, p_ws):
-                            pdf.cell(w, 6, v, border=1, fill=fill, align='C')
-                        pdf.ln()
-
-                # PAGINA 4: Distribucion horaria
-                pdf.add_page()
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "6. Hourly Power Distribution (0-23h)", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_font('Helvetica', '', 8)
-                pdf.set_text_color(80, 80, 80)
-                pdf.multi_cell(0, 5, sanitize_pdf(
-                    "Red: >115% of daily mean  |  Orange: 85-115%  |  Blue: <85%  |  "
-                    "Shift 1: 06-14h  |  Shift 2: 14-22h  |  Shift 3: 22-06h"
-                ))
-                pdf.ln(2)
-                pdf.image(hourly_img, x=10, w=190)
-
-                # PAGINA 5: Comparativa por turno
-                pdf.add_page()
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "7. Shift Comparison - Power and Energy Share", new_x="LMARGIN", new_y="NEXT")
-                pdf.ln(2)
-                y_cur = pdf.get_y()
-                pdf.image(bar_img, x=10, y=y_cur, w=93)
-                pdf.image(pie_img, x=107, y=y_cur, w=93)
-                pdf.ln(80)
-
-                # PAGINA 6: Tendencia diaria
-                pdf.add_page()
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "8. Daily Average Power Trend", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_font('Helvetica', '', 8)
-                pdf.set_text_color(80, 80, 80)
-                pdf.multi_cell(0, 5, sanitize_pdf("Red dots = days exceeding 120% of period average."))
-                pdf.ln(2)
-                pdf.image(trend_img, x=10, w=190)
-
-                pdf_bytes = bytes(pdf.output())
-                st.success("✅ Technical daily report generated!")
-                st.download_button(
-                    label="📥 Download Technical Daily PDF",
-                    data=pdf_bytes,
-                    file_name=f"Technical_Daily_{machine_name}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                    mime="application/pdf"
+                shift_data = df_filt.groupby('Turno')['kW_Instant'].mean().to_dict()
+                shift_data = {f"Shift {k}": v for k, v in shift_data.items()}
+                bar_img = create_bar_chart_png(shift_data, 'Average Power per Shift', 'Shift', 'Power (kW)')
+                top15_for_line = df_filt.nlargest(15, 'kW_Instant')[['kW_Instant', t_col, 'Turno']].copy()
+                top15_for_line = top15_for_line.sort_values(t_col)
+                line_img = create_line_chart_with_peaks_png(
+                    df_filt, t_col, 'kW_Instant', top15_for_line,
+                    title='Power Consumption Trend with Top 15 Peaks Highlighted',
+                    xlabel='Date', ylabel='Power (kW)'
                 )
-            except Exception as e:
-                st.error(f"Error generating PDF: {str(e)}")
-                st.code(traceback.format_exc())
-
-# --- PDF TECNICO MENSUAL ---
-
-def render_pdf_monthly(df_cloud, machine_name):
-    """PDF Mensual Tecnico con estadisticas, comparativa avg vs pico, tabla dia a dia"""
-    if not PDF_ENABLED:
-        st.warning("PDF generation requires fpdf and matplotlib")
-        return
-    if df_cloud.empty:
-        st.warning("No monthly data available. Use Cloud Sync to upload data first.")
-        return
-
-    if st.button("📑 Generate Technical Monthly Report", use_container_width=True, key="pdf_monthly_btn"):
-        with st.spinner("Generating technical monthly report..."):
-            try:
-                energia_mensual = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
-                costo_total     = energia_mensual * COSTO_KWH
-                avg_p  = df_cloud['Potencia_Promedio_kW'].mean()
-                max_p  = df_cloud['Pico_Maximo_kW'].max()
-                min_p  = df_cloud['Potencia_Promedio_kW'].min()
-                std_p  = df_cloud['Potencia_Promedio_kW'].std()
-                load_f = avg_p / max_p if max_p > 0 else 0
-                cov    = (std_p / avg_p * 100) if avg_p > 0 else 0
-                fecha_inicio = df_cloud['Día'].min().strftime('%B %d, %Y')
-                fecha_fin    = df_cloud['Día'].max().strftime('%B %d, %Y')
-
-                daily_data  = df_cloud.set_index('Día')['Potencia_Promedio_kW'].to_dict()
-                daily_fmt   = {k.strftime('%m/%d'): v for k, v in list(daily_data.items())[-20:]}
-                avg_img     = create_line_chart_png(daily_fmt, 'Daily Average Power Trend', 'Date', 'Avg kW')
-
-                peak_data   = df_cloud.set_index('Día')['Pico_Maximo_kW'].to_dict()
-                peak_fmt    = {k.strftime('%m/%d'): v for k, v in list(peak_data.items())[-20:]}
-                peak_img    = create_line_chart_png(peak_fmt, 'Daily Peak Demand', 'Date', 'Peak kW')
-
-                fig_c, ax_c = plt.subplots(figsize=(8, 4))
-                x_c = range(len(df_cloud))
-                ax_c.bar(x_c, df_cloud['Pico_Maximo_kW'].values, label='Peak kW', color='#FF6B6B', alpha=0.7)
-                ax_c.bar(x_c, df_cloud['Potencia_Promedio_kW'].values, label='Avg kW', color='#00B4D8', alpha=0.9)
-                ax_c.axhline(avg_p, color='#2ECC71', linestyle='--', linewidth=2, label=f'Monthly Avg: {avg_p:.2f} kW')
-                for i, (_, row) in enumerate(df_cloud.iterrows()):
-                    ax_c.annotate(f"{row['Pico_Maximo_kW']:.1f}",
-                                  xy=(i, row['Pico_Maximo_kW']),
-                                  xytext=(0, 3), textcoords='offset points',
-                                  ha='center', va='bottom', fontsize=5.5, color='#C0392B')
-                ax_c.set_title('Daily Average vs Peak Power', fontsize=13, fontweight='bold', pad=12)
-                ax_c.set_ylabel('Power (kW)', fontsize=10)
-                ax_c.set_xlabel(f'Day (n={len(df_cloud)})', fontsize=10)
-                ax_c.legend(fontsize=9)
-                ax_c.grid(True, linestyle='--', alpha=0.3)
-                fig_c.patch.set_facecolor('white')
-                ax_c.set_facecolor('#F8F9FA')
+                top_peaks = df_filt.nlargest(15, 'kW_Instant')[['kW_Instant', t_col, 'Turno']].copy()
+                top_peaks['Fecha_Hora'] = top_peaks[t_col].dt.strftime('%Y-%m-%d %H:%M')
+                top_peaks = top_peaks.reset_index(drop=True)
+                fig_peaks, ax_peaks = plt.subplots(figsize=(8, 5))
+                y_vals = top_peaks['kW_Instant'].values
+                x_labels = [f"#{i+1}" for i in range(len(top_peaks))]
+                bars = ax_peaks.bar(x_labels, y_vals, color='#FF6B6B')
+                ax_peaks.set_title('Top 15 Peak Power Events', fontsize=14, fontweight='bold')
+                ax_peaks.set_ylabel('Power (kW)', fontsize=11)
+                ax_peaks.set_xlabel('Event Rank', fontsize=11)
+                for bar, val in zip(bars, y_vals):
+                    ax_peaks.annotate(f'{val:.1f}', xy=(bar.get_x() + bar.get_width()/2, val),
+                                      xytext=(0, 5), textcoords="offset points",
+                                      ha='center', fontsize=8)
+                ax_peaks.grid(True, linestyle='--', alpha=0.3)
+                fig_peaks.patch.set_facecolor('white')
+                ax_peaks.set_facecolor('#F8F9FA')
                 plt.tight_layout()
-                buf_cmp = BytesIO()
-                fig_c.savefig(buf_cmp, format='png', dpi=150, bbox_inches='tight')
-                buf_cmp.seek(0)
-                plt.close(fig_c)
-
+                peaks_img = BytesIO()
+                fig_peaks.savefig(peaks_img, format='png', dpi=150, bbox_inches='tight')
+                peaks_img.seek(0)
+                plt.close(fig_peaks)
                 pdf = ExecutivePDF()
-
-                # PAGINA 1: KPIs mensuales
                 pdf.add_page()
                 pdf.set_font('Helvetica', 'B', 14)
                 pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 10, f"Technical Monthly Report - {machine_name}", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(0, 10, f"Executive Energy Analysis Report", new_x="LMARGIN", new_y="NEXT")
+                pdf.ln(4)
+                pdf.set_font('Helvetica', 'B', 12)
+                pdf.cell(0, 8, f"Daily Executive Summary - {machine_name}", new_x="LMARGIN", new_y="NEXT")
                 pdf.set_font('Helvetica', '', 10)
-                pdf.set_text_color(60, 60, 60)
-                pdf.multi_cell(0, 6, sanitize_pdf(
-                    f"Machine: {machine_name}  |  Period: {fecha_inicio} to {fecha_fin}  |  "
-                    f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                ))
+                pdf.set_text_color(40, 40, 40)
+                fecha_inicio = df_filt[t_col].min().strftime('%B %d, %Y')
+                fecha_fin = df_filt[t_col].max().strftime('%B %d, %Y')
+                costo_total = energia_total * COSTO_KWH
+                narrative = (f"Period: {fecha_inicio} to {fecha_fin}. "
+                             f"Total Energy Consumed: {energia_total:,.2f} kWh. "
+                             f"Estimated Cost: ${costo_total:,.2f} MXN (${COSTO_KWH}/kWh).\n\n"
+                             f"Power demand analysis shows an average consumption of {df_filt['kW_Instant'].mean():.2f} kW, "
+                             f"with a maximum peak of {df_filt['kW_Instant'].max():.2f} kW. "
+                             f"The variability index is {df_filt['kW_Instant'].std()/df_filt['kW_Instant'].mean():.2%}, "
+                             f"indicating {'high' if (df_filt['kW_Instant'].std()/df_filt['kW_Instant'].mean())>0.3 else 'moderate'} operational instability. "
+                             f"The top 15 peak events are highlighted in Figures 2 and 3. "
+                             f"Recommended actions: shift load scheduling and peak clipping strategies.")
+                pdf.multi_cell(0, 6, sanitize_pdf(narrative))
                 pdf.ln(5)
-
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "1. Monthly Electrical KPIs", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_text_color(30, 30, 30)
-                kpi_rows = [
-                    ("Total Days Analyzed",             f"{len(df_cloud)} days"),
-                    ("Analysis Period",                  f"{fecha_inicio} to {fecha_fin}"),
-                    ("Total Estimated Energy",           f"{energia_mensual:,.3f} kWh"),
-                    ("Monthly Average Power",            f"{avg_p:.4f} kW"),
-                    ("Maximum Daily Peak",               f"{max_p:.4f} kW"),
-                    ("Minimum Daily Avg Power",          f"{min_p:.4f} kW"),
-                    ("Std Deviation (daily avg)",        f"{std_p:.4f} kW"),
-                    ("Coefficient of Variation (CoV)",  f"{cov:.2f}%"),
-                    ("Load Factor (avg / peak)",         f"{load_f:.4f}   ({load_f*100:.2f}%)"),
-                    ("Peak Day",                         df_cloud.loc[df_cloud['Pico_Maximo_kW'].idxmax(), 'Día'].strftime('%Y-%m-%d')),
-                    ("Highest Avg Day",                  df_cloud.loc[df_cloud['Potencia_Promedio_kW'].idxmax(), 'Día'].strftime('%Y-%m-%d')),
-                    ("Lowest Avg Day",                   df_cloud.loc[df_cloud['Potencia_Promedio_kW'].idxmin(), 'Día'].strftime('%Y-%m-%d')),
-                    ("Estimated Energy Cost",            f"${costo_total:,.2f} MXN  (@  ${COSTO_KWH} MXN/kWh)"),
-                ]
-                for i, (label, value) in enumerate(kpi_rows):
-                    pdf.set_font('Helvetica', 'B', 9)
-                    fill = i % 2 == 0
-                    pdf.set_fill_color(235, 248, 252) if fill else pdf.set_fill_color(255, 255, 255)
-                    pdf.cell(85, 7, sanitize_pdf(label), border=1, fill=fill)
-                    pdf.set_font('Helvetica', '', 9)
-                    pdf.cell(0, 7, sanitize_pdf(str(value)), border=1, fill=fill, new_x="LMARGIN", new_y="NEXT")
-                pdf.ln(5)
-
-                # PAGINA 2: Tabla dia a dia
+                pdf.set_font('Helvetica', 'B', 11)
+                pdf.cell(0, 8, "Figure 1: Power Distribution by Shift", new_x="LMARGIN", new_y="NEXT")
+                pdf.image(bar_img, x=10, w=190)
                 pdf.add_page()
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "2. Day-by-Day Technical Detail", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_text_color(30, 30, 30)
+                pdf.set_font('Helvetica', 'B', 11)
+                pdf.cell(0, 8, "Figure 2: Time Series with Top 15 Peaks Highlighted", new_x="LMARGIN", new_y="NEXT")
+                pdf.image(line_img, x=10, w=190)
+                pdf.add_page()
+                pdf.set_font('Helvetica', 'B', 11)
+                pdf.cell(0, 8, "Figure 3: Top 15 Peak Power Events (Bar Chart)", new_x="LMARGIN", new_y="NEXT")
+                pdf.image(peaks_img, x=10, w=190)
+                pdf.set_font('Helvetica', 'B', 9)
+                pdf.cell(0, 6, "Peak Event Details (sorted by magnitude):", new_x="LMARGIN", new_y="NEXT")
                 pdf.set_font('Helvetica', 'B', 8)
-                pdf.set_fill_color(0, 180, 216)
-                pdf.set_text_color(255, 255, 255)
-                t_hdrs = ["#", "Date", "Avg Power (kW)", "Peak Power (kW)", "Est. kWh", "Peak/Avg"]
-                t_ws   = [15, 38, 38, 38, 32, 29]
-                for hdr, w in zip(t_hdrs, t_ws):
-                    pdf.cell(w, 7, hdr, border=1, fill=True, align='C')
-                pdf.ln()
-                pdf.set_text_color(30, 30, 30)
-                for i, (_, row) in enumerate(df_cloud.iterrows()):
-                    pdf.set_font('Helvetica', '', 8)
-                    fill = i % 2 == 0
-                    pdf.set_fill_color(245, 250, 255) if fill else pdf.set_fill_color(255, 255, 255)
-                    kwh_est = row['Potencia_Promedio_kW'] * 24
-                    ratio   = row['Pico_Maximo_kW'] / row['Potencia_Promedio_kW'] if row['Potencia_Promedio_kW'] > 0 else 0
-                    vals = [
-                        str(i + 1),
-                        row['Día'].strftime('%Y-%m-%d'),
-                        f"{row['Potencia_Promedio_kW']:.4f}",
-                        f"{row['Pico_Maximo_kW']:.4f}",
-                        f"{kwh_est:.2f}",
-                        f"{ratio:.3f}"
-                    ]
-                    for v, w in zip(vals, t_ws):
-                        pdf.cell(w, 6, v, border=1, fill=fill, align='C')
-                    pdf.ln()
-                    if pdf.get_y() > 265:
-                        pdf.add_page()
-                        pdf.set_font('Helvetica', 'B', 8)
-                        pdf.set_fill_color(0, 180, 216)
-                        pdf.set_text_color(255, 255, 255)
-                        for hdr, w in zip(t_hdrs, t_ws):
-                            pdf.cell(w, 7, hdr, border=1, fill=True, align='C')
-                        pdf.ln()
-                        pdf.set_text_color(30, 30, 30)
-
-                # Paginas de graficas
-                pdf.add_page()
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "3. Daily Average Power Trend", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(20, 6, "Rank", border=1)
+                pdf.cell(50, 6, "Date & Time", border=1)
+                pdf.cell(30, 6, "Power (kW)", border=1)
+                pdf.cell(30, 6, "Shift", border=1)
+                pdf.ln(6)
                 pdf.set_font('Helvetica', '', 8)
-                pdf.set_text_color(80, 80, 80)
-                pdf.multi_cell(0, 5, sanitize_pdf("Red dots = days exceeding 120% of period average."))
-                pdf.ln(2)
-                pdf.image(avg_img, x=10, w=190)
-
+                for i, row in top_peaks.iterrows():
+                    pdf.cell(20, 5, f"{i+1}", border=1)
+                    pdf.cell(50, 5, sanitize_pdf(row['Fecha_Hora']), border=1)
+                    pdf.cell(30, 5, f"{row['kW_Instant']:.1f}", border=1)
+                    pdf.cell(30, 5, f"{row['Turno']}", border=1)
+                    pdf.ln(5)
                 pdf.add_page()
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "4. Daily Peak Demand", new_x="LMARGIN", new_y="NEXT")
-                pdf.ln(2)
-                pdf.image(peak_img, x=10, w=190)
-
-                pdf.add_page()
-                pdf.set_font('Helvetica', 'B', 12)
-                pdf.set_text_color(0, 180, 216)
-                pdf.cell(0, 8, "5. Daily Average vs Peak Comparison (labeled)", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_font('Helvetica', '', 8)
-                pdf.set_text_color(80, 80, 80)
-                pdf.multi_cell(0, 5, sanitize_pdf(
-                    f"Red: daily peak  |  Blue: daily average  |  "
-                    f"Green dashed: monthly avg ({avg_p:.2f} kW)  |  Labels = peak kW per day"
-                ))
-                pdf.ln(2)
-                pdf.image(buf_cmp, x=10, w=190)
-
+                pdf.set_font('Helvetica', 'B', 11)
+                pdf.cell(0, 8, "Executive Summary Table", new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font('Helvetica', '', 9)
+                summary = [
+                    ["Machine", machine_name],
+                    ["Analysis Period", f"{fecha_inicio} to {fecha_fin}"],
+                    ["Total Records", f"{len(df_filt):,}"],
+                    ["Total Energy", f"{energia_total:,.2f} kWh"],
+                    ["Average Power", f"{df_filt['kW_Instant'].mean():.2f} kW"],
+                    ["Maximum Peak", f"{df_filt['kW_Instant'].max():.2f} kW"],
+                    ["Energy Cost", f"${costo_total:,.2f} MXN"],
+                    ["Rate per kWh", f"${COSTO_KWH} MXN"],
+                    ["Report Date", datetime.now().strftime('%B %d, %Y at %H:%M')]
+                ]
+                for row in summary:
+                    pdf.set_font('Helvetica', 'B', 9)
+                    pdf.cell(55, 7, row[0], border=1)
+                    pdf.set_font('Helvetica', '', 9)
+                    pdf.cell(0, 7, sanitize_pdf(row[1]), border=1, new_x="LMARGIN", new_y="NEXT")
                 pdf_bytes = bytes(pdf.output())
-                st.success("✅ Technical monthly report generated!")
+                st.success("✅ Daily report generated successfully!")
                 st.download_button(
-                    label="📥 Download Technical Monthly PDF",
+                    label="📥 Download Daily PDF Report",
                     data=pdf_bytes,
-                    file_name=f"Technical_Monthly_{machine_name}_{datetime.now().strftime('%Y%m')}.pdf",
+                    file_name=f"Daily_Report_{machine_name}_{datetime.now().strftime('%Y%m%d')}.pdf",
                     mime="application/pdf"
                 )
             except Exception as e:
-                st.error(f"Error generating PDF: {str(e)}")
-                st.code(traceback.format_exc())
+                st.error(f"Error: {str(e)}")
 
-@st.fragment
-def render_monthly_insights(df_cloud, machine_name):
-    st.markdown(f"<h2 align='center' style='color:#7F56D9;'>📅 Monthly Analysis - {machine_name}</h2>", unsafe_allow_html=True)
+# --- SIDEBAR DE GESTIÓN DE MÁQUINAS ---
 
-    if df_cloud.empty:
-        st.info(f"No historical data found for {machine_name}. Upload data first using Cloud Sync.")
-        return
 
-    col1, col2, col3, col4 = st.columns(4)
-    energia_mensual = (df_cloud['Potencia_Promedio_kW'] * 24).sum()
-    with col1: st.metric("Total Days", len(df_cloud))
-    with col2: st.metric("Monthly Avg Power", f"{df_cloud['Potencia_Promedio_kW'].mean():.2f} kW")
-    with col3: st.metric("Absolute Peak", f"{df_cloud['Pico_Maximo_kW'].max():.2f} kW")
-    with col4: st.metric("Total Energy", f"{energia_mensual:.0f} kWh")
-
-    fig = px.bar(df_cloud, x='Día', y='Potencia_Promedio_kW',
-                template="plotly_dark",
-                title="Daily Average Power Trend")
-    st.plotly_chart(fig, use_container_width=True)
-
-    render_pdf_monthly(df_cloud, machine_name)
-
-@st.fragment
-def render_cloud_sync(df_filtered, machine_id, machine_name):
-    st.markdown(f"<h2 align='center' style='color:#7F56D9;'>☁️ Cloud Sync - {machine_name}</h2>", unsafe_allow_html=True)
-
-    if not supabase_client:
-        st.warning("Supabase client not available.")
-        return
-
-    if df_filtered.empty:
-        st.warning("No data to sync. Please upload a file first.")
-        return
-
-    if st.button("🚀 Save to Supabase Cloud", type="primary"):
-        with st.spinner(f"Saving {machine_name} data..."):
-            try:
-                daily_data = df_filtered.groupby('Día').agg(
-                    Potencia_Promedio_kW=('kW_Instant', 'mean'),
-                    Pico_Maximo_kW=('kW_Instant', 'max')
-                ).reset_index()
-
-                if save_machine_data(machine_id, daily_data):
-                    st.success(f"✅ {machine_name} data saved successfully!")
-                    st.balloons()
-                else:
-                    st.error("Failed to save data")
-            except Exception as ex:
-                st.error(f"Sync failed: {str(ex)}")
-
-# --- SIDEBAR DE SELECCIÓN DE MÁQUINA ---
-def render_machine_selector():
-    """Renderiza el selector de maquinas en el sidebar"""
-    st.sidebar.markdown("### 🏭 Machine Management")
-
-    machines_df = get_machines()
-
-    with st.sidebar.expander("➕ Add New Machine", expanded=False):
-        new_machine_name = st.text_input("Machine Name", key="new_machine_name")
-        new_machine_desc = st.text_area("Description (optional)", key="new_machine_desc")
-        if st.button("Create Machine", key="create_machine_btn"):
-            if new_machine_name:
-                if add_machine(new_machine_name, new_machine_desc):
-                    st.success(f"Machine '{new_machine_name}' created!")
-                    st.rerun()
-            else:
-                st.warning("Please enter a machine name")
-
-    if not machines_df.empty:
-        machine_options = {row['machine_name']: row['id'] for _, row in machines_df.iterrows()}
-        selected_machine_name = st.sidebar.selectbox(
-            "Select Machine",
-            options=list(machine_options.keys()),
-            key="machine_selector"
-        )
-        selected_machine_id = machine_options[selected_machine_name]
-
-        machine_info = machines_df[machines_df['id'] == selected_machine_id].iloc[0]
-        if machine_info.get('description'):
-            st.sidebar.caption(f"📝 {machine_info['description']}")
-
-        with st.sidebar.expander("⚠️ Delete Machine", expanded=False):
-            st.warning(f"Delete '{selected_machine_name}'? This removes all its data.")
-            if st.button("🗑️ Delete This Machine", key="delete_machine_btn"):
-                if delete_machine(selected_machine_id):
-                    st.success(f"Machine '{selected_machine_name}' deleted!")
-                    st.rerun()
-
-        return selected_machine_id, selected_machine_name
-    else:
-        st.sidebar.info("No machines created yet. Add one above!")
-        return None, None
-
-# --- MAIN APP FLOW ---
+# --- MAIN APP ---
 with st.container():
     colA, colB = st.columns([1, 8])
     with colA:
@@ -1124,170 +562,189 @@ with st.container():
             st.write("⚡")
     with colB:
         st.markdown("<h1 align='center' style='padding-top:20px; font-weight:800;'>Enterprise Energy Analyzer</h1>", unsafe_allow_html=True)
-        st.markdown("<div align='center'><span style='color: #00FFAA; letter-spacing: 2px;'>POWERED BY HOBO & VECTOR-CORE ENGINE | MULTI-MACHINE</span></div>", unsafe_allow_html=True)
+        st.markdown("<div align='center'><span style='color: #00FFAA; letter-spacing: 2px;'>POWERED BY HOBO & VECTOR-CORE ENGINE | FULL DATA LOGGING</span></div>", unsafe_allow_html=True)
 
 st.markdown("---")
 
-machine_id, machine_name = render_machine_selector()
+# --- SIDEBAR ---
 
-if not machine_id:
-    st.markdown("""<div style="text-align: center; padding: 50px; background-color: #1a1e23; border-radius: 15px;">
-            <h1 style="color: #4a4e53; font-size: 60px;">🏭</h1>
-            <h2 style="color: #e0e6ed;">No Machine Selected</h2>
-            <p style="color: #9aa0a6;">Create a machine in the sidebar to start analyzing data.</p>
-            </div>""", unsafe_allow_html=True)
-else:
-    with st.sidebar:
-        st.markdown(f"### 📡 Upload Data - {machine_name}")
-        uploaded_file = st.file_uploader(
-            f"Upload HOBO Report for {machine_name} (CSV/XLSX)",
-            type=["csv", "xlsx"],
-            key=f"upload_{machine_id}"
-        )
-        st.markdown("---")
-        selected_page = option_menu(
-            menu_title="Navigation",
-            options=["KPI Dashboard", "Behaviors", "Trends & Peaks", "Monthly Insights", "Executive PDF", "Cloud Sync"],
-            icons=["layers", "pie-chart", "activity", "calendar-month", "file-earmark-pdf", "cloud-arrow-up"],
-            default_index=0,
-            styles={"nav-link-selected": {"background-color": "#00B4D8"}}
-        )
-        st.markdown("---")
-        with st.expander("⚙️ Electric Parameters", expanded=True):
-            volt = st.selectbox("Voltage (VL-L):", [480, 220, 110], index=0)
-            pf   = st.number_input("Power Factor (PF):", 0.5, 1.0, 0.9, 0.01)
-            st.info(f"💵 kWh Price: ${COSTO_KWH} MXN (fixed)")
-        with st.expander("🎯 Filter Engine", expanded=True):
-            peak_sens = st.slider("Peak Sensitivity (%):", 80, 99, 95, 1)
 
-    if not uploaded_file:
-        st.markdown(f"""<div style="text-align: center; padding: 50px; background-color: #1a1e23; border-radius: 15px;">
-                <h1 style="color: #4a4e53; font-size: 60px;">📁</h1>
-                <h2 style="color: #e0e6ed;">Upload Data for {machine_name}</h2>
-                <p style="color: #9aa0a6;">Upload a HOBO CSV/XLSX file to begin analysis.</p>
-                </div>""", unsafe_allow_html=True)
+# --- CONTENEDOR FLOTANTE CON ARRASTRE Y MINIMIZABLE (con gestión de máquinas) ---
+from streamlit_floating_container import FloatingContainer
+
+data_panel = FloatingContainer(
+    icon=":material/database:",
+    label="Data Manager",
+    start_position="bottom",
+    key="floating_data_panel",
+    glassmorphic=True,
+)
+
+with data_panel.panel():
+    st.markdown("### 🗄️ Data Manager")
+    machines_df = get_machines()
+
+    # Selector de máquina (si existe alguna)
+    if not machines_df.empty:
+        selected_machine_name = st.selectbox(
+            "🏭 Select Machine",
+            options=machines_df['machine_name'].tolist(),
+            key="floating_machine_select"
+        )
+        selected_machine_id = machines_df[machines_df['machine_name'] == selected_machine_name]['id'].iloc[0]
     else:
-        try:
-            file_bytes = uploaded_file.getvalue()
-            ext = uploaded_file.name.split('.')[-1].lower()
-            df_raw, t_col, a_col = load_hobo_data_from_bytes(file_bytes, ext)
-            df_proc = preprocess_electric_data(df_raw, t_col, a_col, volt, pf)
+        selected_machine_name = None
+        selected_machine_id = None
+        st.info("No machines available. Create one below.")
 
-            min_d, max_d = get_filter_bounds(df_proc, t_col)
-            with st.sidebar:
-                with st.expander("🎯 Filter Engine", expanded=True):
-                    range_d = st.date_input(
-                        "Time Range:", [min_d.date(), max_d.date()], key="date_range"
-                    )
-                    shifts = st.multiselect("Shifts:", [1, 2, 3], default=[1, 2, 3], key="shifts")
-
-                    # FILTRO POR POTENCIA kW
-                    kw_min_val = float(df_proc['kW_Instant'].min())
-                    kw_max_val = float(df_proc['kW_Instant'].max())
-                    if kw_max_val > kw_min_val:
-                        kw_step = round(max(0.001, (kw_max_val - kw_min_val) / 200), 3)
-                        kw_range = st.slider(
-                            "⚡ Power Filter (kW):",
-                            min_value=kw_min_val,
-                            max_value=kw_max_val,
-                            value=(kw_min_val, kw_max_val),
-                            step=kw_step,
-                            key="kw_range",
-                            format="%.2f",
-                            help="Filter records by instantaneous power range"
-                        )
+    # Botones para guardar/cargar datos (solo si hay máquina seleccionada)
+    if selected_machine_id is not None:
+        col_save, col_load = st.columns(2)
+        with col_save:
+            if st.button("💾 Save Current Data", key="floating_save_btn", use_container_width=True):
+                if 'current_df' in st.session_state and st.session_state.current_df is not None:
+                    if save_full_machine_data(selected_machine_id, st.session_state.current_df):
+                        st.success("Data saved successfully!")
+                        st.balloons()
                     else:
-                        kw_range = (kw_min_val, kw_max_val)
-                        st.info(f"Power: {kw_min_val:.2f} kW (constant)")
+                        st.error("Failed to save data")
+                else:
+                    st.warning("No data to save. Please upload a CSV first.")
+        with col_load:
+            if st.button("📂 Load Machine Data", key="floating_load_btn", use_container_width=True):
+                with st.spinner("Loading data..."):
+                    loaded_df = load_full_machine_data(selected_machine_id)
+                    if not loaded_df.empty:
+                        st.session_state.current_df = loaded_df
+                        st.success(f"Data for '{selected_machine_name}' loaded!")
+                        st.rerun()
+                    else:
+                        st.warning(f"No saved data found for '{selected_machine_name}'.")
+        st.divider()
 
-            # Aplicar filtros acumulados
-            df_filt = df_proc[df_proc['Turno'].isin(shifts)].copy()
-            if len(range_d) == 2:
-                df_filt = df_filt[
-                    (df_filt['Día'] >= range_d[0]) & (df_filt['Día'] <= range_d[1])
-                ]
-            df_filt = df_filt[
-                (df_filt['kW_Instant'] >= kw_range[0]) &
-                (df_filt['kW_Instant'] <= kw_range[1])
-            ].copy()
-
-            if df_filt.empty:
-                st.warning("⚠️ No data found with selected filters.")
+    # Gestión de máquinas (añadir y eliminar)
+    with st.expander("➕ Add New Machine", expanded=False):
+        new_machine_name = st.text_input("Machine Name", key="new_machine_name_floating")
+        new_machine_desc = st.text_area("Description (optional)", key="new_machine_desc_floating")
+        if st.button("Create Machine", key="create_machine_btn_floating"):
+            if new_machine_name:
+                if add_machine(new_machine_name, new_machine_desc):
+                    st.success(f"Machine '{new_machine_name}' created!")
+                    st.rerun()
             else:
-                e_total = calculate_energy_vectorized(df_filt, t_col, 'kW_Instant')
+                st.warning("Please enter a machine name")
 
-                # ACCIONES RAPIDAS EN SIDEBAR
+    if not machines_df.empty:
+        with st.expander("⚠️ Delete Machine", expanded=False):
+            machine_to_delete = st.selectbox(
+                "Select machine to delete",
+                machines_df['machine_name'].tolist(),
+                key="delete_machine_select_floating"
+            )
+            if st.button("🗑️ Delete Selected Machine", key="delete_machine_btn_floating"):
+                machine_id = machines_df[machines_df['machine_name'] == machine_to_delete]['id'].iloc[0]
+                if delete_machine(machine_id):
+                    st.success(f"Machine '{machine_to_delete}' deleted!")
+                    st.rerun()
+
+# --- ÁREA PRINCIPAL: UPLOAD Y VISUALIZACIÓN ---
+if 'current_df' not in st.session_state:
+    st.session_state.current_df = None
+
+with st.sidebar:
+    st.markdown("### ⚙️ Electric Parameters")
+    volt = st.selectbox("Voltage (VL-L):", [480, 220, 110], index=0)
+    pf = st.number_input("Power Factor (PF):", 0.5, 1.0, 0.9, 0.01)
+    st.info(f"💵 kWh Price: ${COSTO_KWH} MXN")
+    peak_sens = st.slider("Peak Sensitivity (%):", 80, 99, 95, 1, key="peak_sens_global")
+
+selected_page = option_menu(
+    menu_title=None,
+    options=["KPI Dashboard", "Behaviors", "Trends & Peaks", "Executive PDF"],
+    icons=["layers", "pie-chart", "activity", "file-earmark-pdf"],
+    default_index=0,
+    styles={"nav-link-selected": {"background-color": "#00B4D8"}},
+    orientation="horizontal"
+)
+
+uploaded_file = st.file_uploader("📁 Upload HOBO Report (CSV/XLSX)", type=["csv", "xlsx"], key="main_uploader")
+
+if uploaded_file is not None:
+    try:
+        file_bytes = uploaded_file.getvalue()
+        ext = uploaded_file.name.split('.')[-1].lower()
+        df_raw, t_col, a_col = load_hobo_data_from_bytes(file_bytes, ext)
+        df_proc = preprocess_electric_data(df_raw, t_col, a_col, volt, pf)
+        min_d, max_d = get_filter_bounds(df_proc, t_col)
+        with st.sidebar:
+            with st.expander("🎯 Filter Engine", expanded=True):
+                range_d = st.date_input("Time Range:", [min_d.date(), max_d.date()], key="date_range")
+                shifts = st.multiselect("Shifts:", [1, 2, 3], default=[1, 2, 3], key="shifts")
+        df_filt = df_proc[df_proc['Turno'].isin(shifts)].copy()
+        if len(range_d) == 2:
+            df_filt = df_filt[(df_filt['Día'] >= range_d[0]) & (df_filt['Día'] <= range_d[1])]
+        if df_filt.empty:
+            st.warning("⚠️ No data found with selected filters.")
+        else:
+            st.session_state.current_df = df_filt
+            e_total = calculate_energy_vectorized(df_filt, t_col, 'kW_Instant')
+            try:
+                machine_name = selected_machine_name
+            except:
+                machine_name = "Current Machine"
+            if selected_page == "KPI Dashboard":
+                render_kpi_dashboard(df_filt, t_col, a_col, e_total, machine_name)
+            elif selected_page == "Behaviors":
+                render_analisis_turnos(df_filt, volt)
+            elif selected_page == "Trends & Peaks":
                 with st.sidebar:
-                    st.markdown("---")
-                    st.markdown("### 💾 Quick Actions")
-
-                    excel_buffer = io.BytesIO()
-                    df_export = df_filt[[t_col, a_col, 'kW_Instant', 'Turno', 'Hora', 'Día']].copy()
-                    df_export.columns = ['DateTime', 'Amps', 'kW_Instant', 'Shift', 'Hour', 'Day']
-                    daily_summary = df_filt.groupby('Día').agg(
-                        Avg_kW=('kW_Instant', 'mean'),
-                        Peak_kW=('kW_Instant', 'max'),
-                        Min_kW=('kW_Instant', 'min'),
-                        Std_kW=('kW_Instant', 'std'),
-                        Records=('kW_Instant', 'count')
-                    ).reset_index()
-                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                        df_export.to_excel(writer, sheet_name='ProcessedData', index=False)
-                        daily_summary.to_excel(writer, sheet_name='DailySummary', index=False)
-                    st.download_button(
-                        label="📊 Download Excel",
-                        data=excel_buffer.getvalue(),
-                        file_name=f"Data_{machine_name}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                        key="excel_dl"
+                    with st.expander("📊 Filter by Power Range", expanded=False):
+                        min_kw = float(df_filt['kW_Instant'].min())
+                        max_kw = float(df_filt['kW_Instant'].max())
+                        kw_range = st.slider(
+                            "kW Range to display:",
+                            min_value=min_kw,
+                            max_value=max_kw,
+                            value=(min_kw, max_kw),
+                            step=0.5,
+                            key="kw_range_filter"
+                        )
+                render_tendencias_picos(df_filt, t_col, a_col, peak_sens, kw_range[0], kw_range[1])
+            elif selected_page == "Executive PDF":
+                st.markdown(f"<h2 align='center' style='color:#00FFAA;'>📄 Daily Executive PDF Report</h2>", unsafe_allow_html=True)
+                render_pdf_daily(df_filt, t_col, e_total, machine_name)
+    except Exception as e:
+        st.error(f"⚠️ Error: {str(e)}")
+else:
+    if st.session_state.current_df is not None:
+        df_filt = st.session_state.current_df
+        t_col = 'DateTime' if 'DateTime' in df_filt.columns else df_filt.columns[0]
+        e_total = calculate_energy_vectorized(df_filt, t_col, 'kW_Instant')
+        try:
+            machine_name = selected_machine_name
+        except:
+            machine_name = "Loaded Machine"
+        if selected_page == "KPI Dashboard":
+            render_kpi_dashboard(df_filt, t_col, 'Amperios', e_total, machine_name)
+        elif selected_page == "Behaviors":
+            render_analisis_turnos(df_filt, volt)
+        elif selected_page == "Trends & Peaks":
+            with st.sidebar:
+                with st.expander("📊 Filter by Power Range", expanded=False):
+                    min_kw = float(df_filt['kW_Instant'].min())
+                    max_kw = float(df_filt['kW_Instant'].max())
+                    kw_range = st.slider(
+                        "kW Range to display:",
+                        min_value=min_kw,
+                        max_value=max_kw,
+                        value=(min_kw, max_kw),
+                        step=0.5,
+                        key="kw_range_filter"
                     )
+            render_tendencias_picos(df_filt, t_col, 'Amperios', peak_sens, kw_range[0], kw_range[1])
+        elif selected_page == "Executive PDF":
+            render_pdf_daily(df_filt, t_col, e_total, machine_name)
+    else:
+        st.info("📂 Upload a CSV file or load data from a machine using the floating button.")
 
-                    if supabase_client:
-                        if st.button("☁️ Save to Cloud", use_container_width=True,
-                                     key="quick_save_cloud", type="primary"):
-                            with st.spinner("Saving..."):
-                                daily_save = df_filt.groupby('Día').agg(
-                                    Potencia_Promedio_kW=('kW_Instant', 'mean'),
-                                    Pico_Maximo_kW=('kW_Instant', 'max')
-                                ).reset_index()
-                                if save_machine_data(machine_id, daily_save):
-                                    st.success(f"✅ {machine_name} saved!")
-                                else:
-                                    st.error("Save failed")
-
-                    st.markdown("---")
-                    st.caption(f"**Filtered:** {len(df_filt):,} records")
-                    st.caption(f"**Avg:** {df_filt['kW_Instant'].mean():.2f} kW")
-                    st.caption(f"**Peak:** {df_filt['kW_Instant'].max():.2f} kW")
-                    st.caption(f"**Energy:** {e_total:.1f} kWh")
-                    st.caption(f"**Est. cost:** ${e_total * COSTO_KWH:,.0f} MXN")
-
-                historical_data = load_machine_data(machine_id)
-
-                if selected_page == "KPI Dashboard":
-                    render_kpi_dashboard(df_filt, t_col, a_col, e_total, machine_name)
-                elif selected_page == "Trends & Peaks":
-                    render_tendencias_picos(df_filt, t_col, a_col, peak_sens)
-                elif selected_page == "Behaviors":
-                    render_analisis_turnos(df_filt, volt)
-                elif selected_page == "Monthly Insights":
-                    render_monthly_insights(historical_data, machine_name)
-                elif selected_page == "Executive PDF":
-                    st.markdown(
-                        f"<h2 align='center' style='color:#00FFAA;'>📄 Technical Executive PDF Reports - {machine_name}</h2>",
-                        unsafe_allow_html=True
-                    )
-                    tab_daily, tab_monthly = st.tabs(["📅 Daily Technical Report", "📆 Monthly Technical Report"])
-                    with tab_daily:
-                        render_pdf_daily(df_filt, t_col, e_total, machine_name)
-                    with tab_monthly:
-                        render_pdf_monthly(historical_data, machine_name)
-                elif selected_page == "Cloud Sync":
-                    render_cloud_sync(df_filt, machine_id, machine_name)
-
-        except Exception as e:
-            st.error(f"⚠️ Error: {str(e)}")
-            st.code(traceback.format_exc())
-
-st.markdown("<p style='text-align: right; color:#555; font-size:12px;'>Vector-Core Engine v6.1 | Multi-Machine | Rate: $2.40/kWh</p>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: right; color:#555; font-size:12px;'>Desarrollado por Master Ingeniero Erik Armenta | Vector-Core Engine v8.2 | Full Data Logging | Tarifa: $2.40/kWh</p>", unsafe_allow_html=True)
